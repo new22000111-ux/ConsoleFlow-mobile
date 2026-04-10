@@ -2,7 +2,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, codex/improve-browser-for-advanced-console-s38h6d]
     tags:
       - 'v*'
 
