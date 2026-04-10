@@ -59,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var webPermissionRequest: PermissionRequest? = null
+    private var chromeStoreCompatMode = false
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -176,6 +177,7 @@ class MainActivity : AppCompatActivity() {
                     null
                 )
                 if (!url.isNullOrBlank()) {
+                    handleChromeStoreCompatibility(url)
                     runPluginsForUrl(url)
                 }
             }
@@ -406,7 +408,8 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss(); findBar.visibility = View.VISIBLE
         }
         menuView.findViewById<View>(R.id.menuChromeStore).setOnClickListener {
-            dialog.dismiss(); webView.loadUrl(CHROME_STORE_URL)
+            dialog.dismiss()
+            openChromeStore()
         }
         menuView.findViewById<View>(R.id.menuToggleConsole).setOnClickListener {
             dialog.dismiss(); toggleConsole()
@@ -476,6 +479,64 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun openChromeStore() {
+        chromeStoreCompatMode = true
+        webView.settings.userAgentString =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        webView.loadUrl(CHROME_STORE_URL)
+    }
+
+    private fun handleChromeStoreCompatibility(url: String) {
+        val isChromeStore = url.contains("chromewebstore.google.com")
+        if (isChromeStore) {
+            if (!chromeStoreCompatMode) {
+                chromeStoreCompatMode = true
+                webView.settings.userAgentString =
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            }
+            injectChromeStoreInstallButton()
+        } else if (chromeStoreCompatMode) {
+            chromeStoreCompatMode = false
+            updateUserAgent()
+        }
+    }
+
+    private fun injectChromeStoreInstallButton() {
+        webView.evaluateJavascript(
+            """
+            (function(){
+              if(window.__cfStoreInstallInjected){return;}
+              var match=location.pathname.match(/([a-z]{32})(?:\/|$)/);
+              if(!match){return;}
+              window.__cfStoreInstallInjected=true;
+              var btn=document.createElement('button');
+              btn.textContent='Install in ConsoleFlow';
+              btn.style.position='fixed';
+              btn.style.bottom='16px';
+              btn.style.right='16px';
+              btn.style.zIndex='2147483647';
+              btn.style.background='#1f6feb';
+              btn.style.color='#fff';
+              btn.style.border='0';
+              btn.style.padding='12px 14px';
+              btn.style.borderRadius='10px';
+              btn.style.fontSize='13px';
+              btn.style.fontWeight='600';
+              btn.style.boxShadow='0 8px 18px rgba(0,0,0,.35)';
+              btn.onclick=function(){
+                if(window.Android && Android.installFromStore){
+                  Android.installFromStore(location.href);
+                }else{
+                  alert('Installer bridge is unavailable');
+                }
+              };
+              document.body.appendChild(btn);
+            })();
+            """.trimIndent(),
+            null
+        )
     }
 
     private fun showBookmarksDialog() {
@@ -1096,6 +1157,13 @@ class MainActivity : AppCompatActivity() {
                     else -> prefsManager.searchEngine + input
                 }
                 webView.loadUrl(finalUrl)
+            }
+        }
+
+        @JavascriptInterface
+        fun installFromStore(storeUrl: String) {
+            runOnUiThread {
+                installChromeStoreExtension(storeUrl)
             }
         }
     }
