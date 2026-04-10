@@ -27,10 +27,21 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.net.URLEncoder
 
 class MainActivity : AppCompatActivity() {
+    data class BrowserPlugin(
+        val id: String,
+        val name: String,
+        val matchPattern: String,
+        val script: String,
+        val enabled: Boolean,
+        val deepAccess: Boolean
+    )
+
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var progressBar: ProgressBar
@@ -125,6 +136,7 @@ class MainActivity : AppCompatActivity() {
         updateUserAgent()
 
         webView.addJavascriptInterface(SearchBridge(), "Android")
+        webView.addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -160,6 +172,9 @@ class MainActivity : AppCompatActivity() {
                     "(function(){if(window.__erudaLoaded)return;window.__erudaLoaded=true;var x=new XMLHttpRequest();x.open('GET','https://eruda.local/eruda.js',true);x.onload=function(){try{eval(x.responseText);eruda.init();}catch(e){}};x.send();})()",
                     null
                 )
+                if (!url.isNullOrBlank()) {
+                    runPluginsForUrl(url)
+                }
             }
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -387,6 +402,12 @@ class MainActivity : AppCompatActivity() {
         menuView.findViewById<View>(R.id.menuFindInPage).setOnClickListener {
             dialog.dismiss(); findBar.visibility = View.VISIBLE
         }
+        menuView.findViewById<View>(R.id.menuToggleConsole).setOnClickListener {
+            dialog.dismiss(); toggleConsole()
+        }
+        menuView.findViewById<View>(R.id.menuRunJavaScript).setOnClickListener {
+            dialog.dismiss(); showRunJavaScriptDialog()
+        }
         menuView.findViewById<View>(R.id.menuDesktopMode).setOnClickListener {
             dialog.dismiss()
             prefsManager.desktopMode = !prefsManager.desktopMode
@@ -404,6 +425,51 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.show()
+    }
+
+    private fun toggleConsole() {
+        webView.evaluateJavascript(
+            """
+            (function(){
+                if (!window.eruda) return "Eruda is not loaded on this page yet";
+                if (window.__consoleFlowConsoleVisible === false) {
+                    eruda.show();
+                    window.__consoleFlowConsoleVisible = true;
+                    return "Console opened";
+                }
+                eruda.hide();
+                window.__consoleFlowConsoleVisible = false;
+                return "Console hidden";
+            })();
+            """.trimIndent()
+        ) { result ->
+            Toast.makeText(this, result?.trim('"') ?: "Done", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showRunJavaScriptDialog() {
+        val input = EditText(this).apply {
+            hint = "console.log(document.title)"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1A1A1A.toInt())
+            setPadding(32, 24, 32, 24)
+            isSingleLine = false
+            minLines = 5
+        }
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Run JavaScript")
+            .setView(input)
+            .setPositiveButton("Run") { _, _ ->
+                val script = input.text.toString().trim()
+                if (script.isEmpty()) return@setPositiveButton
+                webView.evaluateJavascript(script) { result ->
+                    val output = result?.take(180) ?: "null"
+                    Toast.makeText(this, "Result: $output", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showBookmarksDialog() {
@@ -524,12 +590,209 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
 
+        view.findViewById<View>(R.id.settingPlugins).setOnClickListener {
+            showPluginsDialog()
+        }
+
         // Clear data
         view.findViewById<View>(R.id.settingClearData).setOnClickListener {
             dialog.dismiss(); clearData()
         }
 
         dialog.show()
+    }
+
+    private fun showPluginsDialog() {
+        val plugins = getPlugins()
+        val labels = plugins.map { plugin ->
+            val status = if (plugin.enabled) "ON" else "OFF"
+            "$status • ${plugin.name} (${plugin.matchPattern})"
+        }.toMutableList()
+
+        if (labels.isEmpty()) {
+            labels.add("No plugins yet")
+        }
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Plugin Manager")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (plugins.isNotEmpty()) showPluginActions(plugins[which])
+            }
+            .setPositiveButton("Add Plugin") { _, _ -> showPluginEditor(null) }
+            .setNeutralButton("Clear All") { _, _ ->
+                prefsManager.pluginsJson = "[]"
+                Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showPluginActions(plugin: BrowserPlugin) {
+        val options = arrayOf(
+            if (plugin.enabled) "Disable" else "Enable",
+            "Edit",
+            "Delete"
+        )
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle(plugin.name)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        upsertPlugin(plugin.copy(enabled = !plugin.enabled))
+                        Toast.makeText(this, "Plugin updated", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> showPluginEditor(plugin)
+                    2 -> {
+                        removePlugin(plugin.id)
+                        Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun showPluginEditor(existing: BrowserPlugin?) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 20, 36, 8)
+        }
+
+        val nameInput = EditText(this).apply {
+            hint = "Plugin name"
+            setText(existing?.name ?: "")
+        }
+        val matchInput = EditText(this).apply {
+            hint = "Match host/path (example: github.com or *)"
+            setText(existing?.matchPattern ?: "*")
+        }
+        val scriptInput = EditText(this).apply {
+            hint = "JavaScript code"
+            setText(existing?.script ?: "")
+            isSingleLine = false
+            minLines = 8
+        }
+        val deepAccessSwitch = Switch(this).apply {
+            text = "Deep host access (Clipboard/Share/Open app/Toast)"
+            isChecked = existing?.deepAccess ?: false
+        }
+        val enabledSwitch = Switch(this).apply {
+            text = "Enabled"
+            isChecked = existing?.enabled ?: true
+        }
+
+        container.addView(nameInput)
+        container.addView(matchInput)
+        container.addView(scriptInput)
+        container.addView(deepAccessSwitch)
+        container.addView(enabledSwitch)
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle(if (existing == null) "Create Plugin" else "Edit Plugin")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val name = nameInput.text.toString().trim().ifEmpty { "Plugin" }
+                val match = matchInput.text.toString().trim().ifEmpty { "*" }
+                val script = scriptInput.text.toString()
+                if (script.isBlank()) {
+                    Toast.makeText(this, "Script cannot be empty", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val plugin = BrowserPlugin(
+                    id = existing?.id ?: System.currentTimeMillis().toString(),
+                    name = name,
+                    matchPattern = match,
+                    script = script,
+                    enabled = enabledSwitch.isChecked,
+                    deepAccess = deepAccessSwitch.isChecked
+                )
+                upsertPlugin(plugin)
+                Toast.makeText(this, "Plugin saved", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun getPlugins(): MutableList<BrowserPlugin> {
+        val list = mutableListOf<BrowserPlugin>()
+        val arr = try {
+            JSONArray(prefsManager.pluginsJson)
+        } catch (e: Exception) {
+            JSONArray()
+        }
+        for (i in 0 until arr.length()) {
+            try {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    BrowserPlugin(
+                        id = obj.optString("id", System.currentTimeMillis().toString()),
+                        name = obj.optString("name", "Plugin"),
+                        matchPattern = obj.optString("matchPattern", "*"),
+                        script = obj.optString("script", ""),
+                        enabled = obj.optBoolean("enabled", true),
+                        deepAccess = obj.optBoolean("deepAccess", false)
+                    )
+                )
+            } catch (_: Exception) {
+            }
+        }
+        return list
+    }
+
+    private fun savePlugins(plugins: List<BrowserPlugin>) {
+        val arr = JSONArray()
+        plugins.forEach { plugin ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", plugin.id)
+                    put("name", plugin.name)
+                    put("matchPattern", plugin.matchPattern)
+                    put("script", plugin.script)
+                    put("enabled", plugin.enabled)
+                    put("deepAccess", plugin.deepAccess)
+                }
+            )
+        }
+        prefsManager.pluginsJson = arr.toString()
+    }
+
+    private fun upsertPlugin(plugin: BrowserPlugin) {
+        val plugins = getPlugins()
+        val existingIndex = plugins.indexOfFirst { it.id == plugin.id }
+        if (existingIndex >= 0) plugins[existingIndex] = plugin else plugins.add(plugin)
+        savePlugins(plugins)
+    }
+
+    private fun removePlugin(id: String) {
+        val plugins = getPlugins().filter { it.id != id }
+        savePlugins(plugins)
+    }
+
+    private fun runPluginsForUrl(url: String) {
+        val host = Uri.parse(url).host ?: ""
+        getPlugins()
+            .filter { it.enabled && doesPluginMatch(it.matchPattern, url, host) }
+            .forEach { plugin ->
+                val wrappedScript = buildString {
+                    append("(function(){")
+                    append("window.ConsoleFlowPlugin={")
+                    append("name:${JSONObject.quote(plugin.name)},")
+                    append("match:${JSONObject.quote(plugin.matchPattern)},")
+                    append("deepAccess:${plugin.deepAccess}")
+                    append("};")
+                    if (!plugin.deepAccess) {
+                        append("window.ConsoleFlowHost=undefined;")
+                    }
+                    append(plugin.script)
+                    append("})();")
+                }
+                webView.evaluateJavascript(wrappedScript, null)
+            }
+    }
+
+    private fun doesPluginMatch(pattern: String, url: String, host: String): Boolean {
+        if (pattern == "*") return true
+        val normalized = pattern.trim().lowercase()
+        return host.lowercase().contains(normalized) || url.lowercase().contains(normalized)
     }
 
     private fun clearData() {
@@ -600,5 +863,45 @@ class MainActivity : AppCompatActivity() {
                 webView.loadUrl(finalUrl)
             }
         }
+    }
+
+    inner class PluginBridge {
+        @JavascriptInterface
+        fun toast(message: String) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        @JavascriptInterface
+        fun copyToClipboard(value: String) {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("ConsoleFlow Plugin", value))
+        }
+
+        @JavascriptInterface
+        fun shareText(value: String) {
+            runOnUiThread {
+                val share = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, value)
+                }
+                startActivity(Intent.createChooser(share, "Share from Plugin"))
+            }
+        }
+
+        @JavascriptInterface
+        fun openExternal(url: String) {
+            runOnUiThread {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "Unable to open link", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun currentUrl(): String = webView.url ?: ""
     }
 }
