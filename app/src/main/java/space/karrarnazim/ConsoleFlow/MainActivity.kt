@@ -27,10 +27,23 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.ByteArrayInputStream
 import java.net.URLEncoder
+import java.util.zip.ZipInputStream
 
 class MainActivity : AppCompatActivity() {
+    data class BrowserPlugin(
+        val id: String,
+        val name: String,
+        val matchPattern: String,
+        val script: String,
+        val enabled: Boolean,
+        val deepAccess: Boolean
+    )
+
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var progressBar: ProgressBar
@@ -49,6 +62,7 @@ class MainActivity : AppCompatActivity() {
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
+    private val CHROME_STORE_URL = "https://chromewebstore.google.com/"
 
     // Domains that trigger CAPTCHA when intercepted by OkHttp — skip interception for these
     private val NO_INTERCEPT_DOMAINS = listOf(
@@ -125,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         updateUserAgent()
 
         webView.addJavascriptInterface(SearchBridge(), "Android")
+        webView.addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -160,6 +175,9 @@ class MainActivity : AppCompatActivity() {
                     "(function(){if(window.__erudaLoaded)return;window.__erudaLoaded=true;var x=new XMLHttpRequest();x.open('GET','https://eruda.local/eruda.js',true);x.onload=function(){try{eval(x.responseText);eruda.init();}catch(e){}};x.send();})()",
                     null
                 )
+                if (!url.isNullOrBlank()) {
+                    runPluginsForUrl(url)
+                }
             }
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -387,6 +405,15 @@ class MainActivity : AppCompatActivity() {
         menuView.findViewById<View>(R.id.menuFindInPage).setOnClickListener {
             dialog.dismiss(); findBar.visibility = View.VISIBLE
         }
+        menuView.findViewById<View>(R.id.menuChromeStore).setOnClickListener {
+            dialog.dismiss(); webView.loadUrl(CHROME_STORE_URL)
+        }
+        menuView.findViewById<View>(R.id.menuToggleConsole).setOnClickListener {
+            dialog.dismiss(); toggleConsole()
+        }
+        menuView.findViewById<View>(R.id.menuRunJavaScript).setOnClickListener {
+            dialog.dismiss(); showRunJavaScriptDialog()
+        }
         menuView.findViewById<View>(R.id.menuDesktopMode).setOnClickListener {
             dialog.dismiss()
             prefsManager.desktopMode = !prefsManager.desktopMode
@@ -404,6 +431,51 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.show()
+    }
+
+    private fun toggleConsole() {
+        webView.evaluateJavascript(
+            """
+            (function(){
+                if (!window.eruda) return "Eruda is not loaded on this page yet";
+                if (window.__consoleFlowConsoleVisible === false) {
+                    eruda.show();
+                    window.__consoleFlowConsoleVisible = true;
+                    return "Console opened";
+                }
+                eruda.hide();
+                window.__consoleFlowConsoleVisible = false;
+                return "Console hidden";
+            })();
+            """.trimIndent()
+        ) { result ->
+            Toast.makeText(this, result?.trim('"') ?: "Done", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showRunJavaScriptDialog() {
+        val input = EditText(this).apply {
+            hint = "console.log(document.title)"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1A1A1A.toInt())
+            setPadding(32, 24, 32, 24)
+            isSingleLine = false
+            minLines = 5
+        }
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Run JavaScript")
+            .setView(input)
+            .setPositiveButton("Run") { _, _ ->
+                val script = input.text.toString().trim()
+                if (script.isEmpty()) return@setPositiveButton
+                webView.evaluateJavascript(script) { result ->
+                    val output = result?.take(180) ?: "null"
+                    Toast.makeText(this, "Result: $output", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showBookmarksDialog() {
@@ -524,12 +596,438 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
 
+        view.findViewById<View>(R.id.settingPlugins).setOnClickListener {
+            showPluginsDialog()
+        }
+
         // Clear data
         view.findViewById<View>(R.id.settingClearData).setOnClickListener {
             dialog.dismiss(); clearData()
         }
 
         dialog.show()
+    }
+
+    private fun showPluginsDialog() {
+        val plugins = getPlugins()
+        val labels = mutableListOf(
+            "➕ Add Plugin",
+            "🧩 Install from Chrome Store URL",
+            "🗑 Clear All Plugins"
+        )
+        labels.addAll(plugins.map { plugin ->
+            val status = if (plugin.enabled) "ON" else "OFF"
+            "$status • ${plugin.name} (${plugin.matchPattern})"
+        })
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Plugin Manager")
+            .setItems(labels.toTypedArray()) { _, which ->
+                when (which) {
+                    0 -> showPluginEditor(null)
+                    1 -> showInstallFromChromeStoreDialog()
+                    2 -> {
+                        prefsManager.pluginsJson = "[]"
+                        Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
+                    }
+                    else -> {
+                        val pluginIndex = which - 3
+                        if (pluginIndex >= 0 && pluginIndex < plugins.size) {
+                            showPluginActions(plugins[pluginIndex])
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showInstallFromChromeStoreDialog() {
+        val input = EditText(this).apply {
+            hint = "https://chromewebstore.google.com/detail/.../<extension-id>"
+            setText(webView.url ?: "")
+        }
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Install from Chrome Store")
+            .setMessage("Paste extension page URL. ConsoleFlow will convert content scripts into a plugin.")
+            .setView(input)
+            .setPositiveButton("Install") { _, _ ->
+                val url = input.text.toString().trim()
+                installChromeStoreExtension(url)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun installChromeStoreExtension(pageUrl: String) {
+        val extensionIdRegex = Regex("([a-z]{32})")
+        val extensionId = extensionIdRegex.find(pageUrl)?.value
+        if (extensionId.isNullOrBlank()) {
+            Toast.makeText(this, "Invalid Chrome extension URL", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(this, "Downloading extension…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val updateUrl =
+                    "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=120.0.0.0&acceptformat=crx2,crx3&x=id%3D$extensionId%26installsource%3Dondemand%26uc"
+                val response = client.newCall(Request.Builder().url(updateUrl).build()).execute()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("Download failed (${response.code})")
+                }
+                val crxBytes = response.body?.bytes() ?: throw IllegalStateException("No data returned")
+                val zipBytes = extractZipFromCrx(crxBytes)
+                val plugin = convertCrxZipToPlugin(extensionId, zipBytes)
+                upsertPlugin(plugin)
+
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Installed: ${plugin.name}. Open Plugin Manager to edit permissions.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Install failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun extractZipFromCrx(crxBytes: ByteArray): ByteArray {
+        val signature = byteArrayOf(0x50, 0x4B, 0x03, 0x04) // PK..
+        var start = -1
+        for (i in 0..(crxBytes.size - signature.size)) {
+            if (crxBytes[i] == signature[0] &&
+                crxBytes[i + 1] == signature[1] &&
+                crxBytes[i + 2] == signature[2] &&
+                crxBytes[i + 3] == signature[3]
+            ) {
+                start = i
+                break
+            }
+        }
+        if (start < 0) throw IllegalStateException("Invalid CRX package")
+        return crxBytes.copyOfRange(start, crxBytes.size)
+    }
+
+    private fun convertCrxZipToPlugin(extensionId: String, zipBytes: ByteArray): BrowserPlugin {
+        val files = mutableMapOf<String, String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    val data = ByteArrayOutputStream()
+                    val buffer = ByteArray(4096)
+                    var len = zip.read(buffer)
+                    while (len > 0) {
+                        data.write(buffer, 0, len)
+                        len = zip.read(buffer)
+                    }
+                    files[entry.name] = data.toString(Charsets.UTF_8.name())
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+
+        val manifestRaw = files["manifest.json"] ?: throw IllegalStateException("manifest.json not found")
+        val manifest = JSONObject(manifestRaw)
+        val name = manifest.optString("name", "Chrome Extension $extensionId")
+
+        val contentScripts = manifest.optJSONArray("content_scripts") ?: JSONArray()
+        val scriptBuilder = StringBuilder()
+        var matchPattern = "*"
+
+        for (i in 0 until contentScripts.length()) {
+            val obj = contentScripts.optJSONObject(i) ?: continue
+            val matches = obj.optJSONArray("matches")
+            if (matches != null && matches.length() > 0 && matchPattern == "*") {
+                matchPattern = matches.optString(0, "*")
+            }
+
+            val cssArray = obj.optJSONArray("css") ?: JSONArray()
+            for (j in 0 until cssArray.length()) {
+                val fileName = cssArray.optString(j)
+                if (fileName.isNotBlank()) {
+                    val css = files[fileName] ?: continue
+                    val cssEscaped = JSONObject.quote(css)
+                    scriptBuilder.append(
+                        """
+                        (function(){
+                            var style=document.createElement('style');
+                            style.setAttribute('data-cf-ext', ${JSONObject.quote(extensionId)});
+                            style.appendChild(document.createTextNode($cssEscaped));
+                            (document.head||document.documentElement).appendChild(style);
+                        })();
+                        
+                        """.trimIndent()
+                    )
+                }
+            }
+            val jsArray = obj.optJSONArray("js") ?: JSONArray()
+            for (j in 0 until jsArray.length()) {
+                val fileName = jsArray.optString(j)
+                if (fileName.isNotBlank()) {
+                    val source = files[fileName] ?: continue
+                    scriptBuilder.append("\n/* $fileName */\n")
+                    scriptBuilder.append(source)
+                    scriptBuilder.append("\n")
+                }
+            }
+        }
+
+        if (scriptBuilder.isBlank()) {
+            throw IllegalStateException("No compatible content scripts found")
+        }
+
+        return BrowserPlugin(
+            id = extensionId,
+            name = name,
+            matchPattern = normalizeChromeMatch(matchPattern),
+            script = scriptBuilder.toString(),
+            enabled = true,
+            deepAccess = false
+        )
+    }
+
+    private fun normalizeChromeMatch(matchPattern: String): String {
+        if (matchPattern == "<all_urls>") return "*"
+        return matchPattern
+            .replace("*://", "")
+            .replace("http://", "")
+            .replace("https://", "")
+            .replace("/*", "")
+            .replace("*.", "")
+    }
+
+    private fun showPluginActions(plugin: BrowserPlugin) {
+        val options = arrayOf(
+            if (plugin.enabled) "Disable" else "Enable",
+            "Edit",
+            "Delete"
+        )
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle(plugin.name)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        upsertPlugin(plugin.copy(enabled = !plugin.enabled))
+                        Toast.makeText(this, "Plugin updated", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> showPluginEditor(plugin)
+                    2 -> {
+                        removePlugin(plugin.id)
+                        Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun showPluginEditor(existing: BrowserPlugin?) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 20, 36, 8)
+        }
+
+        val nameInput = EditText(this).apply {
+            hint = "Plugin name"
+            setText(existing?.name ?: "")
+        }
+        val matchInput = EditText(this).apply {
+            hint = "Match host/path (example: github.com or *)"
+            setText(existing?.matchPattern ?: "*")
+        }
+        val scriptInput = EditText(this).apply {
+            hint = "JavaScript code"
+            setText(existing?.script ?: "")
+            isSingleLine = false
+            minLines = 8
+        }
+        val deepAccessSwitch = Switch(this).apply {
+            text = "Deep host access (Clipboard/Share/Open app/Toast)"
+            isChecked = existing?.deepAccess ?: false
+        }
+        val enabledSwitch = Switch(this).apply {
+            text = "Enabled"
+            isChecked = existing?.enabled ?: true
+        }
+
+        container.addView(nameInput)
+        container.addView(matchInput)
+        container.addView(scriptInput)
+        container.addView(deepAccessSwitch)
+        container.addView(enabledSwitch)
+
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle(if (existing == null) "Create Plugin" else "Edit Plugin")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val name = nameInput.text.toString().trim().ifEmpty { "Plugin" }
+                val match = matchInput.text.toString().trim().ifEmpty { "*" }
+                val script = scriptInput.text.toString()
+                if (script.isBlank()) {
+                    Toast.makeText(this, "Script cannot be empty", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val plugin = BrowserPlugin(
+                    id = existing?.id ?: System.currentTimeMillis().toString(),
+                    name = name,
+                    matchPattern = match,
+                    script = script,
+                    enabled = enabledSwitch.isChecked,
+                    deepAccess = deepAccessSwitch.isChecked
+                )
+                upsertPlugin(plugin)
+                Toast.makeText(this, "Plugin saved", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun getPlugins(): MutableList<BrowserPlugin> {
+        val list = mutableListOf<BrowserPlugin>()
+        val arr = try {
+            JSONArray(prefsManager.pluginsJson)
+        } catch (e: Exception) {
+            JSONArray()
+        }
+        for (i in 0 until arr.length()) {
+            try {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    BrowserPlugin(
+                        id = obj.optString("id", System.currentTimeMillis().toString()),
+                        name = obj.optString("name", "Plugin"),
+                        matchPattern = obj.optString("matchPattern", "*"),
+                        script = obj.optString("script", ""),
+                        enabled = obj.optBoolean("enabled", true),
+                        deepAccess = obj.optBoolean("deepAccess", false)
+                    )
+                )
+            } catch (_: Exception) {
+            }
+        }
+        return list
+    }
+
+    private fun savePlugins(plugins: List<BrowserPlugin>) {
+        val arr = JSONArray()
+        plugins.forEach { plugin ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", plugin.id)
+                    put("name", plugin.name)
+                    put("matchPattern", plugin.matchPattern)
+                    put("script", plugin.script)
+                    put("enabled", plugin.enabled)
+                    put("deepAccess", plugin.deepAccess)
+                }
+            )
+        }
+        prefsManager.pluginsJson = arr.toString()
+    }
+
+    private fun upsertPlugin(plugin: BrowserPlugin) {
+        val plugins = getPlugins()
+        val existingIndex = plugins.indexOfFirst { it.id == plugin.id }
+        if (existingIndex >= 0) plugins[existingIndex] = plugin else plugins.add(plugin)
+        savePlugins(plugins)
+    }
+
+    private fun removePlugin(id: String) {
+        val plugins = getPlugins().filter { it.id != id }
+        savePlugins(plugins)
+    }
+
+    private fun runPluginsForUrl(url: String) {
+        val host = Uri.parse(url).host ?: ""
+        getPlugins()
+            .filter { it.enabled && doesPluginMatch(it.matchPattern, url, host) }
+            .forEach { plugin ->
+                val wrappedScript = buildString {
+                    append("(function(){")
+                    append(buildChromeCompatLayer(plugin.id))
+                    append("window.ConsoleFlowPlugin={")
+                    append("name:${JSONObject.quote(plugin.name)},")
+                    append("match:${JSONObject.quote(plugin.matchPattern)},")
+                    append("deepAccess:${plugin.deepAccess}")
+                    append("};")
+                    if (!plugin.deepAccess) {
+                        append("window.ConsoleFlowHost=undefined;")
+                    }
+                    append(plugin.script)
+                    append("})();")
+                }
+                webView.evaluateJavascript(wrappedScript, null)
+            }
+    }
+
+    private fun buildChromeCompatLayer(extensionId: String): String {
+        return """
+            if(!window.chrome){window.chrome={};}
+            if(!window.chrome.runtime){window.chrome.runtime={};}
+            if(!window.chrome.storage){window.chrome.storage={};}
+            if(!window.chrome.storage.local){
+              window.chrome.storage.local={
+                get:function(keys,cb){
+                  try{
+                    var raw=localStorage.getItem('__cf_store__')||'{}';
+                    var data=JSON.parse(raw);
+                    var out={};
+                    if(Array.isArray(keys)){keys.forEach(function(k){out[k]=data[k];});}
+                    else if(typeof keys==='string'){out[keys]=data[keys];}
+                    else if(keys&&typeof keys==='object'){
+                      Object.keys(keys).forEach(function(k){out[k]=data[k]===undefined?keys[k]:data[k];});
+                    }else{out=data;}
+                    if(cb)cb(out);
+                  }catch(e){if(cb)cb({});}
+                },
+                set:function(items,cb){
+                  try{
+                    var raw=localStorage.getItem('__cf_store__')||'{}';
+                    var data=JSON.parse(raw);
+                    Object.keys(items||{}).forEach(function(k){data[k]=items[k];});
+                    localStorage.setItem('__cf_store__',JSON.stringify(data));
+                  }catch(e){}
+                  if(cb)cb();
+                },
+                remove:function(keys,cb){
+                  try{
+                    var raw=localStorage.getItem('__cf_store__')||'{}';
+                    var data=JSON.parse(raw);
+                    var arr=Array.isArray(keys)?keys:[keys];
+                    arr.forEach(function(k){delete data[k];});
+                    localStorage.setItem('__cf_store__',JSON.stringify(data));
+                  }catch(e){}
+                  if(cb)cb();
+                },
+                clear:function(cb){
+                  try{localStorage.removeItem('__cf_store__');}catch(e){}
+                  if(cb)cb();
+                }
+              };
+            }
+            window.chrome.runtime.id = ${JSONObject.quote(extensionId)};
+            window.chrome.runtime.getURL = function(path){
+              return 'chrome-extension://' + window.chrome.runtime.id + '/' + (path||'');
+            };
+            if(!window.chrome.runtime.sendMessage){
+              window.chrome.runtime.sendMessage=function(message,cb){
+                if(cb)cb({ok:false,reason:'background_not_supported_in_webview',echo:message});
+              };
+            }
+            if(!window.browser){window.browser=window.chrome;}
+        """.trimIndent()
+    }
+
+    private fun doesPluginMatch(pattern: String, url: String, host: String): Boolean {
+        if (pattern == "*") return true
+        val normalized = pattern.trim().lowercase()
+        return host.lowercase().contains(normalized) || url.lowercase().contains(normalized)
     }
 
     private fun clearData() {
@@ -600,5 +1098,45 @@ class MainActivity : AppCompatActivity() {
                 webView.loadUrl(finalUrl)
             }
         }
+    }
+
+    inner class PluginBridge {
+        @JavascriptInterface
+        fun toast(message: String) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        @JavascriptInterface
+        fun copyToClipboard(value: String) {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("ConsoleFlow Plugin", value))
+        }
+
+        @JavascriptInterface
+        fun shareText(value: String) {
+            runOnUiThread {
+                val share = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, value)
+                }
+                startActivity(Intent.createChooser(share, "Share from Plugin"))
+            }
+        }
+
+        @JavascriptInterface
+        fun openExternal(url: String) {
+            runOnUiThread {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "Unable to open link", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun currentUrl(): String = webView.url ?: ""
     }
 }
