@@ -20,6 +20,10 @@ class PrefsManager(context: Context) {
         get() = prefs.getString("custom_js", "")!!
         set(value) = prefs.edit().putString("custom_js", value).apply()
 
+    var pluginsJson: String
+        get() = prefs.getString("plugins_json", "[]") ?: "[]"
+        set(value) = prefs.edit().putString("plugins_json", value).apply()
+
     fun addHistory(title: String, url: String) {
         if (url == "file:///android_asset/home.html" || url.startsWith("file:///android_asset/error.html")) return
         val historyArray = getList("history")
