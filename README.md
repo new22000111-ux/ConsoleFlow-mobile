@@ -6,13 +6,13 @@
  
 <br>
  
-**A lightweight, developer-focused Android web browser that brings desktop-like debugging to mobile.**
+**A lightweight, developer-focused Android web browser that brings desktop-like debugging to mobile and chrome plugin support!!!**
 
 [![Open Source](https://img.shields.io/badge/Open%20Source-Yes!-brightgreen?style=for-the-badge)](#)
 [![Status](https://img.shields.io/badge/Status-Still%20Beta-orange?style=for-the-badge)](#)
-[![GitHub stars](https://img.shields.io/github/stars/SANDRO00O/ConsoleFlow-mobile?style=for-the-badge&logo=github)](https://github.com/SANDRO00O/ConsoleFlow-mobile/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/SANDRO00O/ConsoleFlow-mobile?style=for-the-badge&logo=github)](https://github.com/SANDRO00O/ConsoleFlow-mobile/network/members)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](https://github.com/SANDRO00O/ConsoleFlow-mobile/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/SANDRO00O/ConsoleFlow-mobile?style=for-the-badge&logo=github)](https://github.com/new22000111-ux/ConsoleFlow-mobile/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/SANDRO00O/ConsoleFlow-mobile?style=for-the-badge&logo=github)](https://github.com/new22000111-ux/ConsoleFlow-mobile/network/members)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](https://github.com/new22000111-ux/ConsoleFlow-mobile/blob/main/LICENSE)
 
 
 <br>
@@ -28,10 +28,10 @@
 
 ## About The Project
 
-**ConsoleFlow** is not just another web browser. It is built specifically for web developers who need to debug websites on mobile devices. By intercepting web requests using `OkHttp`, ConsoleFlow automatically injects [Eruda](https://github.com/liriliri/eruda) (a mobile web console) into web pages, allowing you to view console logs, inspect DOM elements, check network requests, and execute JavaScript right from your Android phone.
+**ConsoleFlow** is not just another web browser. It is built specifically for web developers who need to debug websites on mobile devices. or for those who need full control over there browser or full plugin support. By intercepting web requests using `OkHttp`, ConsoleFlow automatically injects [Eruda](https://github.com/liriliri/eruda) (a mobile web console) into web pages, allowing you to view console logs, inspect DOM elements, check network requests, and execute JavaScript right from your Android phone.
 
 ## Features
-
+- **full chrome plugin support:** Download and run plugins with a full plugin editor and plugin manager that **supports most Chrome Store plugins.**
 - **Auto-Injected Web Console:** Automatically injects Eruda into web pages for seamless mobile debugging.
 - **Smart Interception (Anti-CAPTCHA):** Bypasses interception for major search engines (Google, Bing, DuckDuckGo) to prevent annoying CAPTCHAs.
 - **Desktop Mode:** One-tap switch to a real desktop user agent and viewport.
@@ -58,7 +58,7 @@ ConsoleFlow is ready to use right out of the box.
 - **Architecture:** Universal. The application is built entirely on Android framework APIs and Java/Kotlin bytecode, meaning it supports all device architectures (armeabi-v7a, arm64-v8a, x86, x86_64) without compatibility issues.
 
 ### Download & Install
-1. Go to the [Releases page](https://github.com/SANDRO00O/ConsoleFlow-mobile/releases).
+1. Go to the [Releases page](https://github.com/new22000111-ux/ConsoleFlow-mobile/releases).
 2. Download the latest `ConsoleFlow.apk` file.
 3. Open the downloaded file to install it on your Android device.
    *(Note: You may need to enable "Install unknown apps" in your device settings).*
@@ -77,13 +77,13 @@ Contributions are what make the open-source community such an amazing place to l
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
-## Contact
+## more..
 
-**Karrar Nazim** - [portfolio](https://karrarnazim.space)
+**more tools** - [snapURL](https://github.com/new22000111-ux/SnapUrl)
 
 Project Link: [https://github.com/SANDRO00O/ConsoleFlow-mobile](https://github.com/SANDRO00O/ConsoleFlow-mobile)
 
 ---
 <div align="center">
-  <i>Built by Karrar Nazim</i>
+  <i>edited by ZAIN NAZIM</i>
 </div>
