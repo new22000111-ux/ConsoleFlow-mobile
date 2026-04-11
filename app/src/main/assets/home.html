@@ -3,168 +3,391 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>Search</title>
+  <title>New Tab</title>
   <style>
-    *, *::before, *::after {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0c0c0c;
+      --bar:     #141414;
+      --cell:    #111111;
+      --border:  #252525;
+      --text:    #d4d4d4;
+      --dim:     #555;
+      --accent:  #4ec9b0;   /* VS Code teal */
+      --hover:   #1a1a1a;
     }
 
     html, body {
       height: 100%;
-      background: #000;
-      color: #fff;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px;
       -webkit-tap-highlight-color: transparent;
       overflow: hidden;
     }
 
-    body {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 32px 24px;
-    }
-
-    .wrap {
-      width: 100%;
-      max-width: 500px;
-      flex-direction: column;
+    /* ══════════════════════════════════
+       TOP BAR  — URL bar + ⋮ button
+    ══════════════════════════════════ */
+    .toolbar {
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 6px;
+      padding: 10px 12px;
+      background: var(--bar);
+      border-bottom: 1px solid var(--border);
     }
 
-    /* Search */
-    .search-box {
-      position: relative;
-      width: 100%;
+    /* URL / search input */
+    .url-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0 10px;
+      gap: 7px;
+      transition: border-color 0.15s;
     }
-
-    .search-input {
-      width: 100%;
-      background: #000000;
-      border: 1px solid #D7D7D7;
-      border-radius: 10px;
-      padding: 15px 52px 15px 18px;
-      font-size: 16px;
-      color: #D7D7D7;
-      outline: none;
-      caret-color: #fff;
-      transition: border-color 0.2s;
-      -webkit-appearance: none;
-      appearance: none;
+    .url-wrap:focus-within {
+      border-color: var(--accent);
     }
-
-    .search-input:focus {
-      border-color: #ffffff;
+    .url-wrap svg {
+      width: 14px;
+      height: 14px;
+      fill: var(--dim);
+      flex-shrink: 0;
     }
-
-    .search-input::placeholder {
-      color: #303030;
-    }
-
-    .search-btn {
-      position: absolute;
-      right: 14px;
-      top: 50%;
-      transform: translateY(-50%);
+    #q {
+      flex: 1;
       background: none;
       border: none;
-      padding: 6px;
-      cursor: pointer;
+      outline: none;
+      padding: 9px 0;
+      font-size: 13px;
+      font-family: inherit;
+      color: var(--text);
+      caret-color: var(--accent);
+      -webkit-appearance: none;
+    }
+    #q::placeholder { color: #3a3a3a; }
+
+    /* ⋮ three-dots settings */
+    .btn-dots {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      width: 36px;
+      height: 36px;
       display: flex;
       align-items: center;
-      opacity: 0.3;
-      transition: opacity 0.15s;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .btn-dots:active {
+      background: var(--hover);
+      border-color: var(--accent);
+    }
+    .btn-dots svg {
+      width: 18px;
+      height: 18px;
+      fill: var(--dim);
     }
 
-    .search-btn:active { opacity: 0.7; }
+    /* ══════════════════════════════════
+       SUGGESTIONS
+    ══════════════════════════════════ */
+    .suggestions {
+      display: none;
+      position: absolute;
+      left: 12px;
+      right: 54px;   /* leave room for the dots button */
+      top: 57px;
+      background: #161616;
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--accent);
+      z-index: 100;
+    }
+    .suggestions.visible { display: block; }
+    .suggestion {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 12px;
+      color: var(--dim);
+      cursor: pointer;
+      border-bottom: 1px solid #1c1c1c;
+      transition: background 0.1s;
+    }
+    .suggestion:last-child { border-bottom: none; }
+    .suggestion:active { background: var(--hover); }
+    .suggestion svg { width: 13px; height: 13px; fill: var(--dim); flex-shrink: 0; }
+    .suggestion span { color: var(--text); }
 
-    .search-btn svg {
+    /* ══════════════════════════════════
+       META ROW  — clock + engine tag
+    ══════════════════════════════════ */
+    .meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bar);
+    }
+    .meta-clock {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--dim);
+      letter-spacing: 0.04em;
+    }
+    .meta-clock strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .meta-engine {
+      font-size: 11px;
+      color: var(--accent);
+      letter-spacing: 0.03em;
+      opacity: 0.8;
+    }
+
+    /* ══════════════════════════════════
+       SITES GRID
+    ══════════════════════════════════ */
+    .grid-wrap {
+      padding: 14px 12px;
+      height: calc(100% - 103px);   /* toolbar + meta */
+      overflow-y: auto;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+    }
+
+    .site {
+      background: var(--cell);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 13px 12px;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.1s;
+      overflow: hidden;
+    }
+    .site:active { background: var(--hover); }
+
+    .site-icon {
       width: 20px;
       height: 20px;
-      fill: #fff;
-    }
-
-    /* Quick links */
-    .links {
+      flex-shrink: 0;
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 18px;
+      align-items: center;
+      justify-content: center;
+    }
+    .site-icon img {
+      width: 16px;
+      height: 16px;
+      object-fit: contain;
+      display: block;
+    }
+    .site-icon .fb {
+      width: 16px;
+      height: 16px;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #2a2a2a;
+      font-family: 'Courier New', monospace;
     }
 
-    .link {
-      background: #000000;
-      border: 1px solid #D7D7D7;
-      border-radius: 8px;
-      padding: 9px 15px;
-      font-size: 13px;
-      color: #C8C8C8;
-      cursor: pointer;
-      transition: color 0.15s, border-color 0.15s;
-      letter-spacing: 0.01em;
-      user-select: none;
+    .site-name {
+      font-size: 12px;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .link:active {
-      background: #121212;
+    /* accent line — left edge on first column items */
+    .site:nth-child(3n+1) {
+      border-left: 2px solid var(--accent);
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="search-box">
+
+  <!-- ── TOOLBAR ── -->
+  <div class="toolbar">
+    <div class="url-wrap">
+      <svg viewBox="0 0 24 24">
+        <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+      </svg>
       <input
         id="q"
-        class="search-input"
         type="text"
         placeholder="Search or enter URL..."
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
+        autocomplete="off" autocorrect="off"
+        autocapitalize="off" spellcheck="false"
         enterkeyhint="go"
       >
-      <button class="search-btn" onclick="go()" aria-label="Go">
-        <svg viewBox="0 0 24 24">
-          <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
-        </svg>
-      </button>
     </div>
+    <!-- ⋮ three dots → Settings -->
+    <button class="btn-dots" onclick="Android.openSettings()" aria-label="Menu">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="5"  r="1.5"/>
+        <circle cx="12" cy="12" r="1.5"/>
+        <circle cx="12" cy="19" r="1.5"/>
+      </svg>
+    </button>
+  </div>
 
-    <div class="links">
-      <span class="link" onclick="nav('https://github.com')">GitHub</span>
-      <span class="link" onclick="nav('https://google.com')">Google</span>
-      <span class="link" onclick="nav('https://developer.mozilla.org')">MDN</span>
-      <span class="link" onclick="nav('https://stackoverflow.com')">Stack Overflow</span>
-      <span class="link" onclick="nav('https://developer.android.com')">Android Dev</span>
-      <span class="link" onclick="nav('https://npmjs.com')">npm</span>
+  <!-- suggestions dropdown -->
+  <div class="suggestions" id="suggestions">
+    <div class="suggestion" id="sug-url" onclick="go()">
+      <svg viewBox="0 0 24 24"><path d="M11 17H7a5 5 0 0 1 0-10h4v2H7a3 3 0 0 0 0 6h4v2zm2 0v-2h4a3 3 0 0 0 0-6h-4V7h4a5 5 0 0 1 0 10h-4zm-5-4v-2h8v2H8z"/></svg>
+      Navigate → <span id="sug-url-text">–</span>
+    </div>
+    <div class="suggestion" onclick="searchWith()">
+      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      Search · <span id="sug-engine-name">Google</span>
     </div>
   </div>
 
-  <script>
-    var input = document.getElementById('q');
+  <!-- ── META ROW ── -->
+  <div class="meta">
+    <span class="meta-clock">
+      <strong id="clock">00:00</strong>
+      &nbsp;<span id="dateStr">–</span>
+    </span>
+    <span class="meta-engine" id="engine-label">● Google</span>
+  </div>
 
-    input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') go();
-    });
+  <!-- ── GRID ── -->
+  <div class="grid-wrap">
+    <div class="grid" id="grid"></div>
+  </div>
 
-    function go() {
-      var val = input.value.trim();
-      if (val) Android.navigate(val);
+<script>
+  var LINKS = [
+    { label: 'GitHub',      url: 'https://github.com'             },
+    { label: 'Google',      url: 'https://google.com'             },
+    { label: 'MDN',         url: 'https://developer.mozilla.org'  },
+    { label: 'Stack O.',    url: 'https://stackoverflow.com'      },
+    { label: 'Android Dev', url: 'https://developer.android.com'  },
+    { label: 'npm',         url: 'https://npmjs.com'              },
+    { label: 'YouTube',     url: 'https://youtube.com'            },
+    { label: 'Cloudflare',  url: 'https://dash.cloudflare.com'    },
+    { label: 'ChatGPT',     url: 'https://chatgpt.com'            },
+  ];
+
+  var ENGINES = {
+    google: { name: 'Google',     url: 'https://www.google.com/search?q='   },
+    ddg:    { name: 'DuckDuckGo', url: 'https://duckduckgo.com/?q='         },
+    brave:  { name: 'Brave',      url: 'https://search.brave.com/search?q=' },
+  };
+  var engine = localStorage.getItem('engine') || 'google';
+  document.getElementById('sug-engine-name').textContent = ENGINES[engine].name;
+  document.getElementById('engine-label').textContent    = '● ' + ENGINES[engine].name;
+
+  /* Clock */
+  function tick() {
+    var now = new Date();
+    document.getElementById('clock').textContent =
+      now.getHours().toString().padStart(2,'0') + ':' +
+      now.getMinutes().toString().padStart(2,'0');
+    var D = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    document.getElementById('dateStr').textContent =
+      D[now.getDay()] + ' ' + now.getDate() + ' ' + M[now.getMonth()];
+  }
+  tick(); setInterval(tick, 10000);
+
+  /* Grid */
+  var grid = document.getElementById('grid');
+  LINKS.forEach(function(l) {
+    var domain = l.url.replace(/^https?:\/\//, '').split('/')[0];
+    var div    = document.createElement('div');
+    div.className = 'site';
+    div.onclick   = function() { Android.navigate(l.url); };
+
+    var icon = document.createElement('div');
+    icon.className = 'site-icon';
+    var img = document.createElement('img');
+    img.src = 'https://www.google.com/s2/favicons?domain=' + domain + '&sz=32';
+    img.onerror = function() {
+      icon.removeChild(img);
+      var fb = document.createElement('div');
+      fb.className   = 'fb';
+      fb.textContent = l.label.charAt(0);
+      icon.appendChild(fb);
+    };
+    icon.appendChild(img);
+
+    var name = document.createElement('div');
+    name.className   = 'site-name';
+    name.textContent = l.label;
+
+    div.appendChild(icon);
+    div.appendChild(name);
+    grid.appendChild(div);
+  });
+
+  /* Search */
+  var input       = document.getElementById('q');
+  var suggestions = document.getElementById('suggestions');
+  var sugUrl      = document.getElementById('sug-url');
+  var sugUrlText  = document.getElementById('sug-url-text');
+
+  function looksLikeUrl(v) {
+    return /^https?:\/\//i.test(v) || /^[a-z0-9-]+\.[a-z]{2,}/i.test(v);
+  }
+
+  input.addEventListener('input', function() {
+    var v = input.value.trim();
+    if (v) {
+      suggestions.classList.add('visible');
+      sugUrlText.textContent = v.length > 34 ? v.slice(0,34)+'…' : v;
+      sugUrl.style.display   = looksLikeUrl(v) ? 'flex' : 'none';
+    } else {
+      suggestions.classList.remove('visible');
     }
+  });
 
-    function nav(url) {
-      // Pass full URL directly — Android side handles https:// check
-      Android.navigate(url);
-    }
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') go(); });
 
-    // Auto-focus with small delay to let keyboard settle
-    setTimeout(function () { input.focus(); }, 150);
-  </script>
+  function go() {
+    var val = input.value.trim();
+    if (!val) return;
+    var url;
+    if      (/^https?:\/\//i.test(val))            url = val;
+    else if (/^[a-z0-9-]+\.[a-z]{2,}/i.test(val)) url = 'https://' + val;
+    else                                            url = ENGINES[engine].url + encodeURIComponent(val);
+    Android.navigate(url);
+  }
+
+  function nav(url) { Android.navigate(url); }
+
+  function searchWith() {
+    var val = input.value.trim();
+    if (!val) return;
+    Android.navigate(ENGINES[engine].url + encodeURIComponent(val));
+  }
+
+  setTimeout(function() { input.focus(); }, 150);
+</script>
 </body>
 </html>
