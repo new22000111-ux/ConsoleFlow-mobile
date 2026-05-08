@@ -79,6 +79,8 @@ class MainActivity : AppCompatActivity() {
     private var lastChromeStorePromptUrl: String? = null
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
+    private var memoryCachedPlugins: MutableList<BrowserPlugin>? = null
+    private val decodedZipCache = ConcurrentHashMap<String, ByteArray>()
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -230,7 +232,9 @@ class MainActivity : AppCompatActivity() {
                         val zipBase64 = plugin?.packageZipBase64
                         if (!zipBase64.isNullOrBlank()) {
                             return try {
-                                val zipBytes = Base64.decode(zipBase64, Base64.DEFAULT)
+                                val zipBytes = decodedZipCache.getOrPut(extensionId) {
+                                    Base64.decode(zipBase64, Base64.DEFAULT)
+                                }
                                 val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
                                 if (fileBytes != null) {
                                     WebResourceResponse(
@@ -939,7 +943,9 @@ class MainActivity : AppCompatActivity() {
         if (pluginBackgroundRuntimes.containsKey(plugin.id)) return
         val encodedZip = plugin.packageZipBase64 ?: return
         val zipBytes = try {
-            Base64.decode(encodedZip, Base64.DEFAULT)
+            decodedZipCache.getOrPut(plugin.id) {
+                Base64.decode(encodedZip, Base64.DEFAULT)
+            }
         } catch (_: Exception) {
             return
         }
@@ -1133,6 +1139,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        memoryCachedPlugins?.let { return it.toMutableList() }
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
             JSONArray(prefsManager.pluginsJson)
@@ -1162,10 +1169,12 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        memoryCachedPlugins = list.toMutableList()
         return list
     }
 
     private fun savePlugins(plugins: List<BrowserPlugin>) {
+        memoryCachedPlugins = plugins.toMutableList()
         val arr = JSONArray()
         plugins.forEach { plugin ->
             arr.put(
@@ -1193,11 +1202,13 @@ class MainActivity : AppCompatActivity() {
         val plugins = getPlugins()
         val existingIndex = plugins.indexOfFirst { it.id == plugin.id }
         if (existingIndex >= 0) plugins[existingIndex] = plugin else plugins.add(plugin)
+        decodedZipCache.remove(plugin.id)
         savePlugins(plugins)
     }
 
     private fun removePlugin(id: String) {
         val plugins = getPlugins().filter { it.id != id }
+        decodedZipCache.remove(id)
         savePlugins(plugins)
     }
 
