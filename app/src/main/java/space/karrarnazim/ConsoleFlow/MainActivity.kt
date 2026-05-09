@@ -1132,10 +1132,25 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // Cache for plugins to avoid JSON parsing and string allocations on every page load
+    private var cachedPluginsJson: String? = null
+    private var cachedPluginsList: List<BrowserPlugin>? = null
+
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+
+        // ⚡ Bolt Optimization:
+        // What: Cache the parsed plugins list and reuse it if the JSON hasn't changed.
+        // Why: getPlugins() is called frequently (e.g., in runPluginsForUrl during page navigation).
+        //      Parsing JSON and instantiating new BrowserPlugin objects repeatedly causes unnecessary overhead.
+        // Impact: Reduces CPU usage and garbage collection churn by preventing repetitive parsing of large JSON strings.
+        if (currentJson == cachedPluginsJson && cachedPluginsList != null) {
+            return cachedPluginsList!!.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -1162,6 +1177,9 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+
+        cachedPluginsJson = currentJson
+        cachedPluginsList = list.toList()
         return list
     }
 

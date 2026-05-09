@@ -1,0 +1,3 @@
+## 2024-05-14 - SharedPreferences JSON overhead in getPlugins()
+**Learning:** `getPlugins()` in `MainActivity.kt` is called frequently (e.g., on every page load via `runPluginsForUrl`). Fetching the JSON string from `SharedPreferences` and parsing it on every call creates a lot of unnecessary object allocations and CPU overhead on the main thread, especially as the number of installed plugins grows.
+**Action:** Always consider caching the parsed result in memory (like `cachedPluginsList`) when frequently accessing complex data from `SharedPreferences`, comparing the raw string before re-parsing.
