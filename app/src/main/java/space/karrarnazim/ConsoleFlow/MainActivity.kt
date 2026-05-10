@@ -61,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fullscreenContainer: FrameLayout
 
     private lateinit var prefsManager: PrefsManager
+    private var cachedPlugins: MutableList<BrowserPlugin>? = null
     private val client = OkHttpClient.Builder().followRedirects(false).build()
     private val extensionDownloadClient = OkHttpClient.Builder()
         .followRedirects(true)
@@ -768,6 +769,7 @@ class MainActivity : AppCompatActivity() {
                     1 -> showInstallFromChromeStoreDialog()
                     2 -> {
                         prefsManager.pluginsJson = "[]"
+                        cachedPlugins?.clear()
                         Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
@@ -1133,6 +1135,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        cachedPlugins?.let { return it.toMutableList() }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
             JSONArray(prefsManager.pluginsJson)
@@ -1162,6 +1166,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        cachedPlugins = list.toMutableList()
         return list
     }
 
@@ -1187,6 +1192,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         prefsManager.pluginsJson = arr.toString()
+        cachedPlugins = plugins.toMutableList()
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
