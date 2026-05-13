@@ -16,6 +16,7 @@ import android.net.http.SslError
 import android.os.Bundle
 import android.os.Environment
 import android.util.Base64
+import android.util.LruCache
 import android.util.Patterns
 import android.view.*
 import android.view.inputmethod.InputMethodManager
@@ -79,6 +80,18 @@ class MainActivity : AppCompatActivity() {
     private var lastChromeStorePromptUrl: String? = null
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
+
+    // Bolt Performance: Cache parsed plugins to avoid parsing large Base64 strings repeatedly
+    private var cachedPluginsJsonHash: Int = 0
+    private var cachedPluginsList: MutableList<BrowserPlugin>? = null
+
+    // Bolt Performance: Cache extracted extension assets
+    // Keys are "$extensionId/$path". Size limit is 5MB.
+    private val extensionAssetCache = object : LruCache<String, ByteArray>(5 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ByteArray): Int {
+            return value.size
+        }
+    }
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -226,6 +239,16 @@ class MainActivity : AppCompatActivity() {
                     val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
                     val path = request.url.pathSegments.drop(1).joinToString("/")
                     if (extensionId.isNotBlank() && path.isNotBlank()) {
+                        val cacheKey = "$extensionId/$path"
+                        val cachedAsset = extensionAssetCache.get(cacheKey)
+                        if (cachedAsset != null) {
+                            return WebResourceResponse(
+                                guessMimeType(path),
+                                "utf-8",
+                                ByteArrayInputStream(cachedAsset)
+                            )
+                        }
+
                         val plugin = findPlugin(extensionId)
                         val zipBase64 = plugin?.packageZipBase64
                         if (!zipBase64.isNullOrBlank()) {
@@ -233,6 +256,7 @@ class MainActivity : AppCompatActivity() {
                                 val zipBytes = Base64.decode(zipBase64, Base64.DEFAULT)
                                 val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
                                 if (fileBytes != null) {
+                                    extensionAssetCache.put(cacheKey, fileBytes)
                                     WebResourceResponse(
                                         guessMimeType(path),
                                         "utf-8",
@@ -1133,9 +1157,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val jsonString = prefsManager.pluginsJson
+        val jsonHash = jsonString.hashCode()
+        if (cachedPluginsList != null && cachedPluginsJsonHash == jsonHash) {
+            return cachedPluginsList!!
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(jsonString)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -1162,6 +1192,9 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+
+        cachedPluginsList = list
+        cachedPluginsJsonHash = jsonHash
         return list
     }
 
