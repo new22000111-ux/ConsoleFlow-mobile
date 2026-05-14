@@ -80,6 +80,9 @@ class MainActivity : AppCompatActivity() {
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
 
+    @Volatile private var cachedPluginsJson: String? = null
+    @Volatile private var cachedPluginsList: List<BrowserPlugin>? = null
+
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
     private val CHROME_STORE_URL = "https://chromewebstore.google.com/"
@@ -1132,10 +1135,19 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // Bolt: Memoizes plugin parsing to avoid expensive JSON parsing on every request
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+        val cachedJson = cachedPluginsJson
+        val cachedList = cachedPluginsList
+
+        if (cachedList != null && cachedJson == currentJson) {
+            return cachedList.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -1162,6 +1174,9 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+
+        cachedPluginsJson = currentJson
+        cachedPluginsList = list.toList()
         return list
     }
 

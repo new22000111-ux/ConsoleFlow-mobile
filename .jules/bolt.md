@@ -1,0 +1,3 @@
+## 2024-05-19 - [SharedPreferences JSON Parsing Bottleneck]
+**Learning:** [In Android applications, parsing large JSON payloads stored in `SharedPreferences` on every method call (like in a WebView `shouldInterceptRequest` handler) can lead to massive CPU and memory overhead. In ConsoleFlow, `MainActivity.getPlugins()` was parsing a massive `pluginsJson` payload repeatedly.]
+**Action:** [Memoize expensive deserializations based on the raw string from SharedPreferences. Use `@Volatile` fields for safe cross-thread visibility of the cached objects, and always return a copy (`.toMutableList()`) to prevent callers from corrupting the cache.]
