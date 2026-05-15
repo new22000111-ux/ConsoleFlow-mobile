@@ -61,6 +61,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fullscreenContainer: FrameLayout
 
     private lateinit var prefsManager: PrefsManager
+
+    // Cache parsed plugins to avoid frequent parsing of large JSON from SharedPreferences
+    // which contains Base64 encoded extension payloads, causing memory/CPU overhead
+    private var cachedPlugins: List<BrowserPlugin>? = null
+
     private val client = OkHttpClient.Builder().followRedirects(false).build()
     private val extensionDownloadClient = OkHttpClient.Builder()
         .followRedirects(true)
@@ -767,7 +772,7 @@ class MainActivity : AppCompatActivity() {
                     0 -> showPluginEditor(null)
                     1 -> showInstallFromChromeStoreDialog()
                     2 -> {
-                        prefsManager.pluginsJson = "[]"
+                        savePlugins(emptyList())
                         Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
@@ -1133,6 +1138,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        if (cachedPlugins != null) {
+            return cachedPlugins!!.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
             JSONArray(prefsManager.pluginsJson)
@@ -1162,10 +1171,12 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        cachedPlugins = list.toList()
         return list
     }
 
     private fun savePlugins(plugins: List<BrowserPlugin>) {
+        cachedPlugins = plugins.toList()
         val arr = JSONArray()
         plugins.forEach { plugin ->
             arr.put(
