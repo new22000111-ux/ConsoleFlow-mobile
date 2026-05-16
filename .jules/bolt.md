@@ -1,0 +1,3 @@
+## 2024-06-11 - SharedPreferences JSON overhead for Chrome extensions
+**Learning:** Parsing the `pluginsJson` array from `SharedPreferences` on every plugin access (which happens repeatedly during page loads and resource interception) causes severe memory churn and CPU overhead because the JSON contains Base64 encoded zip payloads of full Chrome extensions.
+**Action:** Always implement an in-memory cache when storing large or computationally expensive payloads in SharedPreferences, especially when accessing the data on the main thread or frequently in background tasks like WebView resource interception.

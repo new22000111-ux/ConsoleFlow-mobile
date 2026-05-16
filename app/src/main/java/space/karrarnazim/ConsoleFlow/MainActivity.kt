@@ -100,6 +100,8 @@ class MainActivity : AppCompatActivity() {
         else webPermissionRequest?.deny()
     }
 
+    private var cachedPlugins: List<BrowserPlugin>? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
@@ -768,6 +770,7 @@ class MainActivity : AppCompatActivity() {
                     1 -> showInstallFromChromeStoreDialog()
                     2 -> {
                         prefsManager.pluginsJson = "[]"
+                        cachedPlugins = emptyList()
                         Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
@@ -1133,6 +1136,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        cachedPlugins?.let { return it.toMutableList() }
+
         val list = mutableListOf<BrowserPlugin>()
         val arr = try {
             JSONArray(prefsManager.pluginsJson)
@@ -1162,6 +1167,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        cachedPlugins = list.toList()
         return list
     }
 
@@ -1187,6 +1193,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         prefsManager.pluginsJson = arr.toString()
+        cachedPlugins = plugins.toList()
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
