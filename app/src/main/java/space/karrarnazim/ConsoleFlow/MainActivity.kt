@@ -259,39 +259,7 @@ class MainActivity : AppCompatActivity() {
                 val url = request.url.toString()
                 val host = request.url.host ?: ""
 
-                if (host == "chrome-extension.local") {
-                    val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
-                    val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
-                    if (extensionId.isNotBlank() && path.isNotBlank()) {
-                        val plugin = findPlugin(extensionId)
-                        val zipBase64 = plugin?.packageZipBase64
-                        if (!zipBase64.isNullOrBlank()) {
-                            return try {
-                                val zipBytes = Base64.decode(zipBase64, Base64.DEFAULT)
-                                val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
-                                if (fileBytes != null) {
-                                    WebResourceResponse(
-                                        guessMimeType(path),
-                                        "utf-8",
-                                        ByteArrayInputStream(fileBytes)
-                                    )
-                                } else null
-                            } catch (_: Exception) {
-                                null
-                            }
-                        }
-                    }
-                }
-
-                // Serve Eruda locally to avoid CORS issues
-                if (url == "https://eruda.local/eruda.js") {
-                    return try {
-                        val stream = assets.open("eruda.js")
-                        WebResourceResponse("application/javascript", "utf-8", stream).apply {
-                            responseHeaders = mapOf("Access-Control-Allow-Origin" to "*")
-                        }
-                    } catch (e: Exception) { null }
-                }
+                serveLocalBrowserRequest(request)?.let { return it }
 
                 // Skip interception for search engines / major sites — prevents CAPTCHA
                 if (NO_INTERCEPT_DOMAINS.any { host.endsWith(it) }) return null
@@ -1190,6 +1158,67 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun serveLocalBrowserRequest(request: WebResourceRequest): WebResourceResponse? {
+        val url = request.url.toString()
+        val host = request.url.host ?: ""
+
+        if (host == "chrome-extension.local") {
+            val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
+            val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
+            if (extensionId.isNotBlank() && path.isNotBlank()) {
+                val plugin = findPlugin(extensionId)
+                val zipBase64 = plugin?.packageZipBase64
+                if (!zipBase64.isNullOrBlank()) {
+                    return try {
+                        val zipBytes = Base64.decode(zipBase64, Base64.DEFAULT)
+                        val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
+                        if (fileBytes != null) {
+                            WebResourceResponse(
+                                guessMimeType(path),
+                                "utf-8",
+                                ByteArrayInputStream(fileBytes)
+                            ).apply {
+                                responseHeaders = mapOf(
+                                    "Access-Control-Allow-Origin" to "*",
+                                    "Cache-Control" to "no-cache"
+                                )
+                            }
+                        } else {
+                            WebResourceResponse(
+                                "text/plain",
+                                "utf-8",
+                                404,
+                                "Not Found",
+                                mapOf("Access-Control-Allow-Origin" to "*"),
+                                ByteArrayInputStream("Extension file not found: $path".toByteArray())
+                            )
+                        }
+                    } catch (e: Exception) {
+                        WebResourceResponse(
+                            "text/plain",
+                            "utf-8",
+                            500,
+                            "Extension Error",
+                            mapOf("Access-Control-Allow-Origin" to "*"),
+                            ByteArrayInputStream("Extension load error: ${e.message}".toByteArray())
+                        )
+                    }
+                }
+            }
+        }
+
+        if (url == "https://eruda.local/eruda.js") {
+            return try {
+                val stream = assets.open("eruda.js")
+                WebResourceResponse("application/javascript", "utf-8", stream).apply {
+                    responseHeaders = mapOf("Access-Control-Allow-Origin" to "*")
+                }
+            } catch (e: Exception) { null }
+        }
+
+        return null
+    }
+
     private fun normalizeExtensionPath(plugin: BrowserPlugin, path: String?): String {
         val raw = path?.trim().orEmpty()
         val httpsPrefix = "https://chrome-extension.local/${plugin.id}/"
@@ -1225,9 +1254,17 @@ class MainActivity : AppCompatActivity() {
             addJavascriptInterface(SearchBridge(), "Android")
             addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    return serveLocalBrowserRequest(request) ?: super.shouldInterceptRequest(view, request)
+                }
+
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val nextUrl = request.url.toString()
                     return when {
+                        nextUrl.startsWith("chrome-extension://${plugin.id}/") -> {
+                            view.loadUrl(buildExtensionPageUrl(plugin, nextUrl))
+                            true
+                        }
                         nextUrl.startsWith("https://chrome-extension.local/") || nextUrl.startsWith("file:") -> false
                         nextUrl.startsWith("http://") || nextUrl.startsWith("https://") -> {
                             createNewTab(nextUrl)
