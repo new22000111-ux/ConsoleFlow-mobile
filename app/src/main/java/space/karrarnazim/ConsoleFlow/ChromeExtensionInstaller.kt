@@ -11,7 +11,9 @@ data class ParsedExtensionPayload(
     val name: String,
     val matchPattern: String,
     val script: String,
-    val popupPath: String?
+    val popupPath: String?,
+    val sidePanelPath: String?,
+    val optionsPage: String?
 )
 
 object ChromeExtensionInstaller {
@@ -108,8 +110,11 @@ object ChromeExtensionInstaller {
         val contentScripts = manifest.optJSONArray("content_scripts") ?: JSONArray()
         val scriptBuilder = StringBuilder()
         var matchPattern = "*"
-        val popupPath = manifest.optJSONObject("action")?.optString("default_popup")
-            ?: manifest.optJSONObject("browser_action")?.optString("default_popup")
+        val popupPath = manifest.optJSONObject("action")?.optString("default_popup")?.ifBlank { null }
+            ?: manifest.optJSONObject("browser_action")?.optString("default_popup")?.ifBlank { null }
+        val sidePanelPath = manifest.optJSONObject("side_panel")?.optString("default_path")?.ifBlank { null }
+        val optionsPage = manifest.optJSONObject("options_ui")?.optString("page")?.ifBlank { null }
+            ?: manifest.optString("options_page").ifBlank { null }
 
         for (i in 0 until contentScripts.length()) {
             val obj = contentScripts.optJSONObject(i) ?: continue
@@ -150,14 +155,19 @@ object ChromeExtensionInstaller {
             }
         }
 
-        if (scriptBuilder.isBlank()) throw IllegalStateException("No compatible content scripts found")
+        val hasBackground = collectBackgroundScriptPaths(manifest).isNotEmpty()
+        if (scriptBuilder.isBlank() && popupPath.isNullOrBlank() && sidePanelPath.isNullOrBlank() && optionsPage.isNullOrBlank() && !hasBackground) {
+            throw IllegalStateException("No compatible content scripts or extension UI pages found")
+        }
 
         return ParsedExtensionPayload(
             extensionId = extensionId,
             name = name,
             matchPattern = normalizeChromeMatch(matchPattern),
             script = scriptBuilder.toString(),
-            popupPath = popupPath
+            popupPath = popupPath,
+            sidePanelPath = sidePanelPath,
+            optionsPage = optionsPage
         )
     }
 
