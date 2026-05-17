@@ -31,10 +31,18 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : AppCompatActivity() {
+    data class BrowserTab(
+        val id: Int,
+        var title: String,
+        var url: String,
+        var state: Bundle? = null
+    )
+
     data class BrowserPlugin(
         val id: String,
         val name: String,
@@ -59,6 +67,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imgSearchEngine: ImageView
     private lateinit var findBar: LinearLayout
     private lateinit var fullscreenContainer: FrameLayout
+    private lateinit var tabsContainer: LinearLayout
+    private lateinit var tabScroll: HorizontalScrollView
+    private lateinit var btnNewTab: TextView
 
     private lateinit var prefsManager: PrefsManager
     private val client = OkHttpClient.Builder().followRedirects(false).build()
@@ -77,6 +88,10 @@ class MainActivity : AppCompatActivity() {
     private var webPermissionRequest: PermissionRequest? = null
     private var chromeStoreCompatMode = false
     private var lastChromeStorePromptUrl: String? = null
+    private val browserTabs = mutableListOf<BrowserTab>()
+    private var activeTabIndex = -1
+    private var nextTabId = 1
+    private var activePluginPopup: PopupWindow? = null
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
 
@@ -111,9 +126,12 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
 
         if (savedInstanceState != null) {
+            browserTabs.add(BrowserTab(nextTabId++, "Restored Tab", webView.url ?: HOME_URL))
+            activeTabIndex = 0
             webView.restoreState(savedInstanceState)
+            updateTabsUi()
         } else {
-            webView.loadUrl(HOME_URL)
+            createNewTab(HOME_URL)
         }
 
         onBackPressedDispatcher.addCallback(this) {
@@ -128,6 +146,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
+        saveActiveTabState()
         webView.saveState(outState)
     }
 
@@ -140,6 +159,9 @@ class MainActivity : AppCompatActivity() {
         imgSearchEngine = findViewById(R.id.imgSearchEngine)
         findBar = findViewById(R.id.findBar)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
+        tabsContainer = findViewById(R.id.tabsContainer)
+        tabScroll = findViewById(R.id.tabScroll)
+        btnNewTab = findViewById(R.id.btnNewTab)
 
         // Load current search engine favicon
         updateSearchEngineIcon()
@@ -188,6 +210,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     textUrl.setText(url)
                 }
+                updateActiveTab(url = url ?: HOME_URL, title = "Loading…")
                 updateBookmarkIcon(url ?: "")
             }
 
@@ -196,13 +219,11 @@ class MainActivity : AppCompatActivity() {
                 swipeRefresh.isRefreshing = false
                 progressBar.visibility = View.INVISIBLE
                 url?.let {
+                    updateActiveTab(url = it, title = view?.title?.takeIf { title -> title.isNotBlank() } ?: readableTabTitle(it))
                     if (it != HOME_URL) prefsManager.addHistory(view?.title ?: "Unknown", it)
                 }
-                // Fallback Eruda injection — XHR + eval bypasses CSP script-src restrictions
-                view?.evaluateJavascript(
-                    "(function(){if(window.__erudaLoaded)return;window.__erudaLoaded=true;var x=new XMLHttpRequest();x.open('GET','https://eruda.local/eruda.js',true);x.onload=function(){try{eval(x.responseText);eruda.init();}catch(e){}};x.send();})()",
-                    null
-                )
+                // Keep the developer console available without relying on cross-origin XHR.
+                injectConsole(show = false)
                 if (!url.isNullOrBlank()) {
                     handleChromeStoreCompatibility(url)
                     maybeShowNativeInstallPrompt(url)
@@ -224,7 +245,7 @@ class MainActivity : AppCompatActivity() {
 
                 if (host == "chrome-extension.local") {
                     val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
-                    val path = request.url.pathSegments.drop(1).joinToString("/")
+                    val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
                     if (extensionId.isNotBlank() && path.isNotBlank()) {
                         val plugin = findPlugin(extensionId)
                         val zipBase64 = plugin?.packageZipBase64
@@ -250,7 +271,9 @@ class MainActivity : AppCompatActivity() {
                 if (url == "https://eruda.local/eruda.js") {
                     return try {
                         val stream = assets.open("eruda.js")
-                        WebResourceResponse("application/javascript", "utf-8", stream)
+                        WebResourceResponse("application/javascript", "utf-8", stream).apply {
+                            responseHeaders = mapOf("Access-Control-Allow-Origin" to "*")
+                        }
                     } catch (e: Exception) { null }
                 }
 
@@ -400,6 +423,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.goBack).setOnClickListener { if (webView.canGoBack()) webView.goBack() }
         findViewById<View>(R.id.goForward).setOnClickListener { if (webView.canGoForward()) webView.goForward() }
         findViewById<View>(R.id.goHome).setOnClickListener { webView.loadUrl(HOME_URL) }
+        findViewById<View>(R.id.btnConsole).setOnClickListener { toggleConsole() }
+        btnNewTab.setOnClickListener { createNewTab(HOME_URL) }
 
         btnBookmark.setOnClickListener {
             val url = webView.url ?: return@setOnClickListener
@@ -432,6 +457,115 @@ class MainActivity : AppCompatActivity() {
             hideKeyboard()
         }
     }
+
+    private fun createNewTab(url: String) {
+        saveActiveTabState()
+        browserTabs.add(BrowserTab(nextTabId++, "New Tab", url))
+        activeTabIndex = browserTabs.lastIndex
+        updateTabsUi()
+        webView.loadUrl(url)
+    }
+
+    private fun switchToTab(index: Int) {
+        if (index == activeTabIndex || index !in browserTabs.indices) return
+        saveActiveTabState()
+        activeTabIndex = index
+        updateTabsUi()
+        val tab = browserTabs[index]
+        val restored = tab.state?.let { webView.restoreState(it) } != null
+        if (!restored) webView.loadUrl(tab.url.ifBlank { HOME_URL })
+        textUrl.setText(if (tab.url == HOME_URL || tab.url.startsWith(ERROR_URL)) "" else tab.url)
+    }
+
+    private fun closeTab(index: Int) {
+        if (index !in browserTabs.indices) return
+        if (browserTabs.size == 1) {
+            browserTabs[0].apply {
+                title = "New Tab"
+                url = HOME_URL
+                state = null
+            }
+            activeTabIndex = 0
+            updateTabsUi()
+            webView.loadUrl(HOME_URL)
+            return
+        }
+
+        browserTabs.removeAt(index)
+        activeTabIndex = when {
+            activeTabIndex > index -> activeTabIndex - 1
+            activeTabIndex >= browserTabs.size -> browserTabs.lastIndex
+            else -> activeTabIndex
+        }
+        updateTabsUi()
+        val tab = browserTabs[activeTabIndex]
+        val restored = tab.state?.let { webView.restoreState(it) } != null
+        if (!restored) webView.loadUrl(tab.url.ifBlank { HOME_URL })
+    }
+
+    private fun saveActiveTabState() {
+        if (activeTabIndex !in browserTabs.indices) return
+        val state = Bundle()
+        webView.saveState(state)
+        browserTabs[activeTabIndex].apply {
+            this.state = state
+            url = webView.url ?: url
+            title = webView.title?.takeIf { it.isNotBlank() } ?: title
+        }
+    }
+
+    private fun updateActiveTab(url: String? = null, title: String? = null) {
+        if (activeTabIndex !in browserTabs.indices) return
+        browserTabs[activeTabIndex].apply {
+            if (!url.isNullOrBlank()) this.url = url
+            if (!title.isNullOrBlank()) this.title = title
+        }
+        updateTabsUi()
+    }
+
+    private fun updateTabsUi() {
+        tabsContainer.removeAllViews()
+        browserTabs.forEachIndexed { index, tab ->
+            val chip = TextView(this).apply {
+                text = "${tab.title.ifBlank { readableTabTitle(tab.url) }.take(18)}  ×"
+                setTextColor(if (index == activeTabIndex) 0xFFFFFFFF.toInt() else 0xFFB7C3D4.toInt())
+                textSize = 13f
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setPadding(dp(12), 0, dp(12), 0)
+                background = getDrawable(
+                    if (index == activeTabIndex) R.drawable.browser_tab_active_bg
+                    else R.drawable.browser_tab_inactive_bg
+                )
+                setOnClickListener { switchToTab(index) }
+                setOnTouchListener { view, event ->
+                    if (event.action == MotionEvent.ACTION_UP && event.x >= view.width - dp(34)) {
+                        closeTab(index)
+                        true
+                    } else {
+                        false
+                    }
+                }
+                setOnLongClickListener {
+                    closeTab(index)
+                    true
+                }
+            }
+            val lp = LinearLayout.LayoutParams(dp(132), dp(32)).apply {
+                marginEnd = dp(6)
+            }
+            tabsContainer.addView(chip, lp)
+        }
+        tabScroll.post { tabScroll.fullScroll(HorizontalScrollView.FOCUS_RIGHT) }
+    }
+
+    private fun readableTabTitle(url: String): String {
+        if (url == HOME_URL) return "Home"
+        val uri = runCatching { Uri.parse(url) }.getOrNull()
+        return uri?.host?.removePrefix("www.") ?: "New Tab"
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     // ── Custom dark menu dialog ────────────────────────────────────────────────
     private fun showMenu(anchor: View) {
@@ -497,22 +631,57 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleConsole() {
+        injectConsole(show = true) { message ->
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun injectConsole(show: Boolean, onComplete: ((String) -> Unit)? = null) {
+        val shouldToggle = show.toString()
         webView.evaluateJavascript(
             """
             (function(){
-                if (!window.eruda) return "Eruda is not loaded on this page yet";
-                if (window.__consoleFlowConsoleVisible === false) {
+                try {
+                    var shouldToggle = $shouldToggle;
+                    if (!window.eruda) {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('GET', 'https://eruda.local/eruda.js', false);
+                        xhr.send(null);
+                        if (xhr.status && xhr.status >= 400) return 'Console failed to load (' + xhr.status + ')';
+                        (0, eval)(xhr.responseText);
+                        if (!window.eruda) return 'Console failed to load';
+                        eruda.init({
+                            defaults: {
+                                displaySize: 55,
+                                transparency: 0.96
+                            }
+                        });
+                        window.__erudaLoaded = true;
+                        window.__consoleFlowConsoleVisible = false;
+                    }
+
+                    if (!shouldToggle) {
+                        if (window.eruda && eruda.hide) eruda.hide();
+                        window.__consoleFlowConsoleVisible = false;
+                        return 'Console ready';
+                    }
+
+                    if (window.__consoleFlowConsoleVisible === true) {
+                        eruda.hide();
+                        window.__consoleFlowConsoleVisible = false;
+                        return 'Console hidden';
+                    }
+
                     eruda.show();
                     window.__consoleFlowConsoleVisible = true;
-                    return "Console opened";
+                    return 'Console opened';
+                } catch (e) {
+                    return 'Console error: ' + (e && e.message ? e.message : e);
                 }
-                eruda.hide();
-                window.__consoleFlowConsoleVisible = false;
-                return "Console hidden";
             })();
             """.trimIndent()
         ) { result ->
-            Toast.makeText(this, result?.trim('"') ?: "Done", Toast.LENGTH_SHORT).show()
+            onComplete?.invoke(result?.trim('"') ?: "Done")
         }
     }
 
@@ -925,13 +1094,12 @@ class MainActivity : AppCompatActivity() {
         webView.url?.let { currentUrl ->
             runSinglePluginForUrl(plugin, currentUrl)
         }
-        webView.evaluateJavascript(
-            "(function(){try{if(window.__cfExtBus&&window.__cfExtBus.listeners&&window.__cfExtBus.listeners['action:onClicked']){(window.__cfExtBus.listeners['action:onClicked']||[]).forEach(function(fn){try{fn({id:1,url:location.href,title:document.title||''});}catch(e){}});}}catch(e){}})();",
-            null
-        )
         if (!plugin.popupPath.isNullOrBlank()) {
             showPluginPopup(plugin)
+            Toast.makeText(this, "Popup opened: ${plugin.name}", Toast.LENGTH_SHORT).show()
+            return
         }
+        firePluginActionClicked()
         Toast.makeText(this, "Plugin started: ${plugin.name}", Toast.LENGTH_SHORT).show()
     }
 
@@ -994,6 +1162,13 @@ class MainActivity : AppCompatActivity() {
         pluginBackgroundRuntimes[plugin.id] = runtimeWebView
     }
 
+    private fun firePluginActionClicked() {
+        webView.evaluateJavascript(
+            "(function(){try{if(window.__cfExtBus&&window.__cfExtBus.listeners&&window.__cfExtBus.listeners['action:onClicked']){(window.__cfExtBus.listeners['action:onClicked']||[]).forEach(function(fn){try{fn({id:1,url:location.href,title:document.title||'',active:true,currentWindow:true});}catch(e){}});}}catch(e){}})();",
+            null
+        )
+    }
+
     private fun showPluginPopup(plugin: BrowserPlugin) {
         val popupPath = plugin.popupPath
         if (popupPath.isNullOrBlank()) {
@@ -1005,27 +1180,68 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        activePluginPopup?.dismiss()
         val popupWebView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            setBackgroundColor(0xFF121212.toInt())
+            settings.databaseEnabled = true
+            setBackgroundColor(0xFF111820.toInt())
             addJavascriptInterface(SearchBridge(), "Android")
             addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val nextUrl = request.url.toString()
+                    return if (nextUrl.startsWith("http://") || nextUrl.startsWith("https://chrome-extension.local/") || nextUrl.startsWith("file:")) {
+                        false
+                    } else if (nextUrl.startsWith("https://")) {
+                        createNewTab(nextUrl)
+                        activePluginPopup?.dismiss()
+                        true
+                    } else {
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(nextUrl)))
+                            true
+                        } catch (_: Exception) {
+                            true
+                        }
+                    }
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    val bootstrap = "${buildChromeCompatLayer(plugin.id)}${buildPluginApiBootstrap(plugin)}"
+                    val bootstrap = buildString {
+                        append(buildChromeCompatLayer(plugin.id))
+                        append(buildPluginApiBootstrap(plugin))
+                        append("window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closePopupFor(")
+                        append(JSONObject.quote(plugin.id))
+                        append(");};")
+                    }
                     view?.evaluateJavascript(bootstrap, null)
                 }
             }
             loadUrl("https://chrome-extension.local/${plugin.id}/${popupPath.trimStart('/')}")
         }
 
-        AlertDialog.Builder(this, R.style.DarkDialog)
-            .setTitle("${plugin.name} Popup")
-            .setView(popupWebView)
-            .setNegativeButton("Close", null)
-            .show()
+        val width = minOf(dp(360), (resources.displayMetrics.widthPixels * 0.92f).toInt()).coerceAtLeast(dp(260))
+        val height = minOf(dp(560), (resources.displayMetrics.heightPixels * 0.72f).toInt()).coerceAtLeast(dp(220))
+        val container = FrameLayout(this).apply {
+            background = getDrawable(R.drawable.browser_popup_bg)
+            setPadding(dp(1), dp(1), dp(1), dp(1))
+            addView(popupWebView, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+        }
+        activePluginPopup = PopupWindow(container, width, height, true).apply {
+            isOutsideTouchable = true
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            elevation = dp(10).toFloat()
+            setOnDismissListener {
+                popupWebView.destroy()
+                if (activePluginPopup === this) activePluginPopup = null
+            }
+            showAtLocation(webView, Gravity.TOP or Gravity.END, dp(10), dp(106))
+        }
     }
 
     private fun showPluginPermissionsDialog(plugin: BrowserPlugin) {
@@ -1278,6 +1494,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildChromeCompatLayer(extensionId: String): String {
+        val defaultPopupPath = findPlugin(extensionId)?.popupPath.orEmpty()
         return """
             (function(){
               if(!window.__cfExtBus){window.__cfExtBus={listeners:{}};}
@@ -1343,7 +1560,7 @@ class MainActivity : AppCompatActivity() {
             
               window.chrome.runtime.id = ${JSONObject.quote(extensionId)};
               window.chrome.runtime.getURL = function(path){
-                return 'chrome-extension://' + window.chrome.runtime.id + '/' + String(path||'').replace(/^\/+/,'');
+                return 'https://chrome-extension.local/' + window.chrome.runtime.id + '/' + String(path||'').replace(/^\/+/,'');
               };
             
               if(!window.chrome.runtime.onMessage){
@@ -1377,15 +1594,17 @@ class MainActivity : AppCompatActivity() {
               }
               if(!window.chrome.tabs.create){
                 window.chrome.tabs.create=function(createProperties, cb){
+                  var targetUrl=(createProperties&&createProperties.url)||'about:blank';
                   try{
-                    if(createProperties && createProperties.url && window.ConsoleFlowApi && window.ConsoleFlowApi.openExternal){
-                      window.ConsoleFlowApi.openExternal(createProperties.url);
+                    if(window.ConsoleFlowHost){
+                      ConsoleFlowHost.openTabFor(window.chrome.runtime.id, targetUrl, !(createProperties&&createProperties.active===false));
                     }
                   }catch(e){}
-                  if(cb)cb({id:2,url:(createProperties&&createProperties.url)||''});
+                  if(cb)cb({id:Date.now(),active:!(createProperties&&createProperties.active===false),url:targetUrl});
                 };
               }
             
+              var popupPath = window.__cfActionPopup || ${JSONObject.quote(defaultPopupPath)};
               function setupActionApi(target){
                 if(!target.onClicked){
                   target.onClicked={addListener:function(fn){ addListener('action:onClicked', fn); }};
@@ -1393,6 +1612,9 @@ class MainActivity : AppCompatActivity() {
                 if(!target.setBadgeText){target.setBadgeText=function(_,cb){if(cb)cb();};}
                 if(!target.setTitle){target.setTitle=function(_,cb){if(cb)cb();};}
                 if(!target.setIcon){target.setIcon=function(_,cb){if(cb)cb();};}
+                if(!target.setPopup){target.setPopup=function(details,cb){popupPath=(details&&details.popup)||'';window.__cfActionPopup=popupPath;if(cb)cb();};}
+                if(!target.getPopup){target.getPopup=function(_,cb){if(cb)cb(popupPath||'');};}
+                if(!target.openPopup){target.openPopup=function(options,cb){try{if(window.ConsoleFlowHost)ConsoleFlowHost.openPopupFor(window.chrome.runtime.id);}catch(e){} if(cb)cb();};}
               }
               setupActionApi(window.chrome.action);
               setupActionApi(window.chrome.browserAction);
@@ -1555,6 +1777,32 @@ class MainActivity : AppCompatActivity() {
             val plugin = findPlugin(pluginId) ?: return ""
             if (!plugin.allowReadUrl) return ""
             return webView.url ?: ""
+        }
+
+        @JavascriptInterface
+        fun openTabFor(pluginId: String, url: String, active: Boolean) {
+            findPlugin(pluginId) ?: return
+            runOnUiThread {
+                if (active) {
+                    createNewTab(url)
+                    activePluginPopup?.dismiss()
+                } else {
+                    browserTabs.add(BrowserTab(nextTabId++, readableTabTitle(url), url))
+                    updateTabsUi()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun closePopupFor(pluginId: String) {
+            findPlugin(pluginId) ?: return
+            runOnUiThread { activePluginPopup?.dismiss() }
+        }
+
+        @JavascriptInterface
+        fun openPopupFor(pluginId: String) {
+            val plugin = findPlugin(pluginId) ?: return
+            runOnUiThread { showPluginPopup(plugin) }
         }
     }
 }
