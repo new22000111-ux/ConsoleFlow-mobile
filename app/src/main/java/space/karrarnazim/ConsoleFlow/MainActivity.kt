@@ -198,11 +198,8 @@ class MainActivity : AppCompatActivity() {
                 url?.let {
                     if (it != HOME_URL) prefsManager.addHistory(view?.title ?: "Unknown", it)
                 }
-                // Fallback Eruda injection — XHR + eval bypasses CSP script-src restrictions
-                view?.evaluateJavascript(
-                    "(function(){if(window.__erudaLoaded)return;window.__erudaLoaded=true;var x=new XMLHttpRequest();x.open('GET','https://eruda.local/eruda.js',true);x.onload=function(){try{eval(x.responseText);eruda.init();}catch(e){}};x.send();})()",
-                    null
-                )
+                // Keep the developer console available without relying on cross-origin XHR.
+                injectConsole(show = false)
                 if (!url.isNullOrBlank()) {
                     handleChromeStoreCompatibility(url)
                     maybeShowNativeInstallPrompt(url)
@@ -250,7 +247,9 @@ class MainActivity : AppCompatActivity() {
                 if (url == "https://eruda.local/eruda.js") {
                     return try {
                         val stream = assets.open("eruda.js")
-                        WebResourceResponse("application/javascript", "utf-8", stream)
+                        WebResourceResponse("application/javascript", "utf-8", stream).apply {
+                            responseHeaders = mapOf("Access-Control-Allow-Origin" to "*")
+                        }
                     } catch (e: Exception) { null }
                 }
 
@@ -400,6 +399,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.goBack).setOnClickListener { if (webView.canGoBack()) webView.goBack() }
         findViewById<View>(R.id.goForward).setOnClickListener { if (webView.canGoForward()) webView.goForward() }
         findViewById<View>(R.id.goHome).setOnClickListener { webView.loadUrl(HOME_URL) }
+        findViewById<View>(R.id.btnConsole).setOnClickListener { toggleConsole() }
 
         btnBookmark.setOnClickListener {
             val url = webView.url ?: return@setOnClickListener
@@ -497,22 +497,57 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleConsole() {
+        injectConsole(show = true) { message ->
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun injectConsole(show: Boolean, onComplete: ((String) -> Unit)? = null) {
+        val shouldToggle = show.toString()
         webView.evaluateJavascript(
             """
             (function(){
-                if (!window.eruda) return "Eruda is not loaded on this page yet";
-                if (window.__consoleFlowConsoleVisible === false) {
+                try {
+                    var shouldToggle = $shouldToggle;
+                    if (!window.eruda) {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('GET', 'https://eruda.local/eruda.js', false);
+                        xhr.send(null);
+                        if (xhr.status && xhr.status >= 400) return 'Console failed to load (' + xhr.status + ')';
+                        (0, eval)(xhr.responseText);
+                        if (!window.eruda) return 'Console failed to load';
+                        eruda.init({
+                            defaults: {
+                                displaySize: 55,
+                                transparency: 0.96
+                            }
+                        });
+                        window.__erudaLoaded = true;
+                        window.__consoleFlowConsoleVisible = false;
+                    }
+
+                    if (!shouldToggle) {
+                        if (window.eruda && eruda.hide) eruda.hide();
+                        window.__consoleFlowConsoleVisible = false;
+                        return 'Console ready';
+                    }
+
+                    if (window.__consoleFlowConsoleVisible === true) {
+                        eruda.hide();
+                        window.__consoleFlowConsoleVisible = false;
+                        return 'Console hidden';
+                    }
+
                     eruda.show();
                     window.__consoleFlowConsoleVisible = true;
-                    return "Console opened";
+                    return 'Console opened';
+                } catch (e) {
+                    return 'Console error: ' + (e && e.message ? e.message : e);
                 }
-                eruda.hide();
-                window.__consoleFlowConsoleVisible = false;
-                return "Console hidden";
             })();
             """.trimIndent()
         ) { result ->
-            Toast.makeText(this, result?.trim('"') ?: "Done", Toast.LENGTH_SHORT).show()
+            onComplete?.invoke(result?.trim('"') ?: "Done")
         }
     }
 
