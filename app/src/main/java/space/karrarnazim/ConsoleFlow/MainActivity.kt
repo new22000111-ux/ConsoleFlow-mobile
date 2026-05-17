@@ -49,6 +49,8 @@ class MainActivity : AppCompatActivity() {
         val matchPattern: String,
         val script: String,
         val popupPath: String? = null,
+        val sidePanelPath: String? = null,
+        val optionsPage: String? = null,
         val packageZipBase64: String? = null,
         val enabled: Boolean,
         val deepAccess: Boolean,
@@ -67,6 +69,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imgSearchEngine: ImageView
     private lateinit var findBar: LinearLayout
     private lateinit var fullscreenContainer: FrameLayout
+    private lateinit var pluginSidePanelHost: FrameLayout
     private lateinit var tabsContainer: LinearLayout
     private lateinit var tabScroll: HorizontalScrollView
     private lateinit var btnNewTab: TextView
@@ -92,6 +95,8 @@ class MainActivity : AppCompatActivity() {
     private var activeTabIndex = -1
     private var nextTabId = 1
     private var activePluginPopup: PopupWindow? = null
+    private var activeSidePanelWebView: WebView? = null
+    private var activeSidePanelPluginId: String? = null
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
 
@@ -137,6 +142,7 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this) {
             when {
                 customView != null -> hideCustomView()
+                pluginSidePanelHost.visibility == View.VISIBLE -> closePluginSidePanel()
                 findBar.visibility == View.VISIBLE -> findBar.visibility = View.GONE
                 webView.canGoBack() -> webView.goBack()
                 else -> finish()
@@ -150,6 +156,14 @@ class MainActivity : AppCompatActivity() {
         webView.saveState(outState)
     }
 
+    override fun onDestroy() {
+        activePluginPopup?.dismiss()
+        closePluginSidePanel()
+        pluginBackgroundRuntimes.values.forEach { it.destroy() }
+        pluginBackgroundRuntimes.clear()
+        super.onDestroy()
+    }
+
     private fun initViews() {
         webView = findViewById(R.id.webView)
         swipeRefresh = findViewById(R.id.swipeRefresh)
@@ -159,6 +173,7 @@ class MainActivity : AppCompatActivity() {
         imgSearchEngine = findViewById(R.id.imgSearchEngine)
         findBar = findViewById(R.id.findBar)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
+        pluginSidePanelHost = findViewById(R.id.pluginSidePanelHost)
         tabsContainer = findViewById(R.id.tabsContainer)
         tabScroll = findViewById(R.id.tabScroll)
         btnNewTab = findViewById(R.id.btnNewTab)
@@ -225,6 +240,7 @@ class MainActivity : AppCompatActivity() {
                 // Keep the developer console available without relying on cross-origin XHR.
                 injectConsole(show = false)
                 if (!url.isNullOrBlank()) {
+                    injectExtensionPageApiIfNeeded(url)
                     handleChromeStoreCompatibility(url)
                     maybeShowNativeInstallPrompt(url)
                     runPluginsForUrl(url)
@@ -1010,6 +1026,8 @@ class MainActivity : AppCompatActivity() {
                     matchPattern = payload.matchPattern,
                     script = payload.script,
                     popupPath = payload.popupPath,
+                    sidePanelPath = payload.sidePanelPath,
+                    optionsPage = payload.optionsPage,
                     packageZipBase64 = Base64.encodeToString(zipBytes, Base64.NO_WRAP),
                     enabled = true,
                     deepAccess = false,
@@ -1039,48 +1057,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPluginActions(plugin: BrowserPlugin) {
-        val options = arrayOf(
-            if (plugin.enabled) "Disable" else "Enable",
-            "Edit",
-            "Run Full Plugin",
-            "Permissions",
-            "View Last Error",
-            "Delete"
-        )
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions.add((if (plugin.enabled) "Disable" else "Enable") to {
+            upsertPlugin(plugin.copy(enabled = !plugin.enabled))
+            if (plugin.enabled) {
+                pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
+                if (activeSidePanelPluginId == plugin.id) closePluginSidePanel()
+            }
+            Toast.makeText(this, "Plugin updated", Toast.LENGTH_SHORT).show()
+        })
+        actions.add("Edit" to { showPluginEditor(plugin) })
+        actions.add("Run Best UI" to { runPluginFully(plugin) })
+        if (!plugin.popupPath.isNullOrBlank()) actions.add("Open Action Popup" to { showPluginPopup(plugin, plugin.popupPath) })
+        if (!plugin.sidePanelPath.isNullOrBlank()) actions.add("Open Side Panel" to { showPluginSidePanel(plugin, plugin.sidePanelPath) })
+        if (!plugin.optionsPage.isNullOrBlank()) actions.add("Open Options Page" to { openPluginPageInTab(plugin, plugin.optionsPage) })
+        actions.add("Permissions" to { showPluginPermissionsDialog(plugin) })
+        actions.add("View Last Error" to {
+            val errorText = pluginLastError[plugin.id] ?: "No runtime errors recorded for this plugin."
+            AlertDialog.Builder(this, R.style.DarkDialog)
+                .setTitle("${plugin.name} - Last Error")
+                .setMessage(errorText)
+                .setPositiveButton("OK", null)
+                .show()
+        })
+        actions.add("Delete" to {
+            removePlugin(plugin.id)
+            pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
+            pluginLastError.remove(plugin.id)
+            if (activeSidePanelPluginId == plugin.id) closePluginSidePanel()
+            Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
+        })
+
         AlertDialog.Builder(this, R.style.DarkDialog)
             .setTitle(plugin.name)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> {
-                        upsertPlugin(plugin.copy(enabled = !plugin.enabled))
-                        if (plugin.enabled) {
-                            pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
-                        }
-                        Toast.makeText(this, "Plugin updated", Toast.LENGTH_SHORT).show()
-                    }
-                    1 -> showPluginEditor(plugin)
-                    2 -> {
-                        runPluginFully(plugin)
-                    }
-                    3 -> {
-                        showPluginPermissionsDialog(plugin)
-                    }
-                    4 -> {
-                        val errorText = pluginLastError[plugin.id] ?: "No runtime errors recorded for this plugin."
-                        AlertDialog.Builder(this, R.style.DarkDialog)
-                            .setTitle("${plugin.name} - Last Error")
-                            .setMessage(errorText)
-                            .setPositiveButton("OK", null)
-                            .show()
-                    }
-                    5 -> {
-                        removePlugin(plugin.id)
-                        pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
-                        pluginLastError.remove(plugin.id)
-                        Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second.invoke() }
             .show()
     }
 
@@ -1094,13 +1104,24 @@ class MainActivity : AppCompatActivity() {
         webView.url?.let { currentUrl ->
             runSinglePluginForUrl(plugin, currentUrl)
         }
-        if (!plugin.popupPath.isNullOrBlank()) {
-            showPluginPopup(plugin)
-            Toast.makeText(this, "Popup opened: ${plugin.name}", Toast.LENGTH_SHORT).show()
-            return
+        when {
+            !plugin.sidePanelPath.isNullOrBlank() -> {
+                showPluginSidePanel(plugin, plugin.sidePanelPath)
+                Toast.makeText(this, "Side panel opened: ${plugin.name}", Toast.LENGTH_SHORT).show()
+            }
+            !plugin.popupPath.isNullOrBlank() -> {
+                showPluginPopup(plugin, plugin.popupPath)
+                Toast.makeText(this, "Popup opened: ${plugin.name}", Toast.LENGTH_SHORT).show()
+            }
+            !plugin.optionsPage.isNullOrBlank() -> {
+                openPluginPageInTab(plugin, plugin.optionsPage)
+                Toast.makeText(this, "Options page opened: ${plugin.name}", Toast.LENGTH_SHORT).show()
+            }
+            else -> {
+                firePluginActionClicked()
+                Toast.makeText(this, "Plugin started: ${plugin.name}", Toast.LENGTH_SHORT).show()
+            }
         }
-        firePluginActionClicked()
-        Toast.makeText(this, "Plugin started: ${plugin.name}", Toast.LENGTH_SHORT).show()
     }
 
     private fun ensureBackgroundRuntime(plugin: BrowserPlugin) {
@@ -1169,36 +1190,51 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun showPluginPopup(plugin: BrowserPlugin) {
-        val popupPath = plugin.popupPath
-        if (popupPath.isNullOrBlank()) {
-            Toast.makeText(this, "This plugin has no popup UI", Toast.LENGTH_SHORT).show()
-            return
+    private fun normalizeExtensionPath(plugin: BrowserPlugin, path: String?): String {
+        val raw = path?.trim().orEmpty()
+        val httpsPrefix = "https://chrome-extension.local/${plugin.id}/"
+        val chromePrefix = "chrome-extension://${plugin.id}/"
+        return when {
+            raw.startsWith(httpsPrefix) -> raw.removePrefix(httpsPrefix)
+            raw.startsWith(chromePrefix) -> raw.removePrefix(chromePrefix)
+            else -> raw.trimStart('/')
         }
+    }
+
+    private fun buildExtensionPageUrl(plugin: BrowserPlugin, path: String?): String {
+        val cleanPath = normalizeExtensionPath(plugin, path)
+        return "https://chrome-extension.local/${plugin.id}/$cleanPath"
+    }
+
+    private fun ensurePluginPackage(plugin: BrowserPlugin): Boolean {
         if (plugin.packageZipBase64.isNullOrBlank()) {
             Toast.makeText(this, "Plugin package files are missing", Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
+        return true
+    }
 
-        activePluginPopup?.dismiss()
-        val popupWebView = WebView(this).apply {
+    private fun createExtensionPageWebView(plugin: BrowserPlugin, closeScript: String): WebView {
+        return WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
             setBackgroundColor(0xFF111820.toInt())
             addJavascriptInterface(SearchBridge(), "Android")
             addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val nextUrl = request.url.toString()
-                    return if (nextUrl.startsWith("http://") || nextUrl.startsWith("https://chrome-extension.local/") || nextUrl.startsWith("file:")) {
-                        false
-                    } else if (nextUrl.startsWith("https://")) {
-                        createNewTab(nextUrl)
-                        activePluginPopup?.dismiss()
-                        true
-                    } else {
-                        try {
+                    return when {
+                        nextUrl.startsWith("https://chrome-extension.local/") || nextUrl.startsWith("file:") -> false
+                        nextUrl.startsWith("http://") || nextUrl.startsWith("https://") -> {
+                            createNewTab(nextUrl)
+                            activePluginPopup?.dismiss()
+                            true
+                        }
+                        else -> try {
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(nextUrl)))
                             true
                         } catch (_: Exception) {
@@ -1212,18 +1248,32 @@ class MainActivity : AppCompatActivity() {
                     val bootstrap = buildString {
                         append(buildChromeCompatLayer(plugin.id))
                         append(buildPluginApiBootstrap(plugin))
-                        append("window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closePopupFor(")
-                        append(JSONObject.quote(plugin.id))
-                        append(");};")
+                        append(closeScript)
                     }
                     view?.evaluateJavascript(bootstrap, null)
                 }
             }
-            loadUrl("https://chrome-extension.local/${plugin.id}/${popupPath.trimStart('/')}")
+        }
+    }
+
+    private fun showPluginPopup(plugin: BrowserPlugin, path: String? = plugin.popupPath) {
+        val popupPath = path?.takeIf { it.isNotBlank() }
+        if (popupPath.isNullOrBlank()) {
+            Toast.makeText(this, "This plugin has no popup UI", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!ensurePluginPackage(plugin)) return
+
+        activePluginPopup?.dismiss()
+        val popupWebView = createExtensionPageWebView(
+            plugin,
+            "window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closePopupFor(${JSONObject.quote(plugin.id)});};"
+        ).apply {
+            loadUrl(buildExtensionPageUrl(plugin, popupPath))
         }
 
-        val width = minOf(dp(360), (resources.displayMetrics.widthPixels * 0.92f).toInt()).coerceAtLeast(dp(260))
-        val height = minOf(dp(560), (resources.displayMetrics.heightPixels * 0.72f).toInt()).coerceAtLeast(dp(220))
+        val width = minOf(dp(420), (resources.displayMetrics.widthPixels * 0.92f).toInt()).coerceAtLeast(dp(220))
+        val height = minOf(dp(560), (resources.displayMetrics.heightPixels * 0.72f).toInt()).coerceAtLeast(dp(180))
         val container = FrameLayout(this).apply {
             background = getDrawable(R.drawable.browser_popup_bg)
             setPadding(dp(1), dp(1), dp(1), dp(1))
@@ -1242,6 +1292,86 @@ class MainActivity : AppCompatActivity() {
             }
             showAtLocation(webView, Gravity.TOP or Gravity.END, dp(10), dp(106))
         }
+    }
+
+    private fun showPluginSidePanel(plugin: BrowserPlugin, path: String? = plugin.sidePanelPath ?: plugin.popupPath ?: plugin.optionsPage) {
+        val panelPath = path?.takeIf { it.isNotBlank() }
+        if (panelPath.isNullOrBlank()) {
+            Toast.makeText(this, "This plugin has no side panel page", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!ensurePluginPackage(plugin)) return
+
+        closePluginSidePanel()
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.browser_popup_bg)
+            setPadding(dp(1), dp(1), dp(1), dp(1))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(6), 0)
+            setBackgroundColor(0xFF151E2A.toInt())
+        }
+        val title = TextView(this).apply {
+            text = plugin.name
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 13f
+            maxLines = 1
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setOnClickListener { closePluginSidePanel() }
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(38), 1f))
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(38)))
+
+        val panelWebView = createExtensionPageWebView(
+            plugin,
+            "window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closeSidePanelFor(${JSONObject.quote(plugin.id)});};"
+        ).apply {
+            loadUrl(buildExtensionPageUrl(plugin, panelPath))
+        }
+        panel.addView(header, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(38)
+        ))
+        panel.addView(panelWebView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+
+        activeSidePanelWebView = panelWebView
+        activeSidePanelPluginId = plugin.id
+        pluginSidePanelHost.removeAllViews()
+        pluginSidePanelHost.addView(panel, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        pluginSidePanelHost.visibility = View.VISIBLE
+    }
+
+    private fun closePluginSidePanel() {
+        activeSidePanelWebView?.destroy()
+        activeSidePanelWebView = null
+        activeSidePanelPluginId = null
+        pluginSidePanelHost.removeAllViews()
+        pluginSidePanelHost.visibility = View.GONE
+    }
+
+    private fun openPluginPageInTab(plugin: BrowserPlugin, path: String? = plugin.optionsPage ?: plugin.popupPath ?: plugin.sidePanelPath) {
+        val pagePath = path?.takeIf { it.isNotBlank() }
+        if (pagePath.isNullOrBlank()) {
+            Toast.makeText(this, "This plugin has no extension page", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!ensurePluginPackage(plugin)) return
+        createNewTab(buildExtensionPageUrl(plugin, pagePath))
     }
 
     private fun showPluginPermissionsDialog(plugin: BrowserPlugin) {
@@ -1332,6 +1462,8 @@ class MainActivity : AppCompatActivity() {
                     matchPattern = match,
                     script = script,
                     popupPath = existing?.popupPath,
+                    sidePanelPath = existing?.sidePanelPath,
+                    optionsPage = existing?.optionsPage,
                     packageZipBase64 = existing?.packageZipBase64,
                     enabled = enabledSwitch.isChecked,
                     deepAccess = deepAccessSwitch.isChecked,
@@ -1365,6 +1497,8 @@ class MainActivity : AppCompatActivity() {
                         matchPattern = obj.optString("matchPattern", "*"),
                         script = obj.optString("script", ""),
                         popupPath = obj.optString("popupPath", "").ifBlank { null },
+                        sidePanelPath = obj.optString("sidePanelPath", "").ifBlank { null },
+                        optionsPage = obj.optString("optionsPage", "").ifBlank { null },
                         packageZipBase64 = obj.optString("packageZipBase64", "").ifBlank { null },
                         enabled = obj.optBoolean("enabled", true),
                         deepAccess = obj.optBoolean("deepAccess", false),
@@ -1391,6 +1525,8 @@ class MainActivity : AppCompatActivity() {
                     put("matchPattern", plugin.matchPattern)
                     put("script", plugin.script)
                     put("popupPath", plugin.popupPath ?: "")
+                    put("sidePanelPath", plugin.sidePanelPath ?: "")
+                    put("optionsPage", plugin.optionsPage ?: "")
                     put("packageZipBase64", plugin.packageZipBase64 ?: "")
                     put("enabled", plugin.enabled)
                     put("deepAccess", plugin.deepAccess)
@@ -1451,6 +1587,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun injectExtensionPageApiIfNeeded(url: String) {
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return
+        if (uri.host != "chrome-extension.local") return
+        val extensionId = uri.pathSegments.firstOrNull().orEmpty()
+        val plugin = findPlugin(extensionId) ?: return
+        val bootstrap = buildString {
+            append(buildChromeCompatLayer(plugin.id))
+            append(buildPluginApiBootstrap(plugin))
+            append("window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closeExtensionSurfaceFor(")
+            append(JSONObject.quote(plugin.id))
+            append(");};")
+        }
+        webView.evaluateJavascript(bootstrap, null)
+    }
+
     private fun buildPluginApiBootstrap(plugin: BrowserPlugin): String {
         return buildString {
             append("window.ConsoleFlowPlugin={")
@@ -1494,7 +1645,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildChromeCompatLayer(extensionId: String): String {
-        val defaultPopupPath = findPlugin(extensionId)?.popupPath.orEmpty()
+        val plugin = findPlugin(extensionId)
+        val defaultPopupPath = plugin?.popupPath.orEmpty()
+        val defaultSidePanelPath = plugin?.sidePanelPath.orEmpty()
         return """
             (function(){
               if(!window.__cfExtBus){window.__cfExtBus={listeners:{}};}
@@ -1515,6 +1668,8 @@ class MainActivity : AppCompatActivity() {
               if(!window.chrome.tabs){window.chrome.tabs={};}
               if(!window.chrome.action){window.chrome.action={};}
               if(!window.chrome.browserAction){window.chrome.browserAction={};}
+              if(!window.chrome.sidePanel){window.chrome.sidePanel={};}
+              if(!window.chrome.windows){window.chrome.windows={};}
             
               var storeKey='__cf_store__' + ${JSONObject.quote(extensionId)};
               if(!window.chrome.storage.local){
@@ -1604,6 +1759,48 @@ class MainActivity : AppCompatActivity() {
                 };
               }
             
+
+
+              if(!window.chrome.windows.create){
+                window.chrome.windows.create=function(createData, cb){
+                  var targetUrl=(createData&&createData.url)||'';
+                  if(Array.isArray(targetUrl)){targetUrl=targetUrl[0]||'';}
+                  try{if(window.ConsoleFlowHost)ConsoleFlowHost.openWindowFor(window.chrome.runtime.id,targetUrl,String((createData&&createData.type)||'popup'),Number((createData&&createData.width)||0),Number((createData&&createData.height)||0));}catch(e){}
+                  if(cb)cb({id:Date.now(),focused:true,type:(createData&&createData.type)||'popup',tabs:[{id:Date.now()+1,url:targetUrl}]});
+                };
+              }
+              if(!window.chrome.windows.getCurrent){
+                window.chrome.windows.getCurrent=function(_, cb){if(typeof _==='function'){cb=_;} if(cb)cb({id:1,focused:true,type:'normal'});};
+              }
+              if(!window.chrome.windows.remove){
+                window.chrome.windows.remove=function(windowId, cb){try{if(window.ConsoleFlowHost)ConsoleFlowHost.closeExtensionSurfaceFor(window.chrome.runtime.id);}catch(e){} if(cb)cb();};
+              }
+
+              var sidePanelPath = window.__cfSidePanelPath || ${JSONObject.quote(defaultSidePanelPath)};
+              if(!window.chrome.sidePanel.setOptions){
+                window.chrome.sidePanel.setOptions=function(options, cb){
+                  if(options && options.path){sidePanelPath=options.path;window.__cfSidePanelPath=sidePanelPath;}
+                  if(cb)cb();
+                };
+              }
+              if(!window.chrome.sidePanel.getOptions){
+                window.chrome.sidePanel.getOptions=function(options, cb){
+                  if(cb)cb({enabled:!!sidePanelPath,path:sidePanelPath||''});
+                };
+              }
+              if(!window.chrome.sidePanel.open){
+                window.chrome.sidePanel.open=function(options, cb){
+                  try{if(window.ConsoleFlowHost)ConsoleFlowHost.openSidePanelFor(window.chrome.runtime.id, sidePanelPath||'');}catch(e){}
+                  if(cb)cb();
+                };
+              }
+              if(!window.chrome.sidePanel.setPanelBehavior){
+                window.chrome.sidePanel.setPanelBehavior=function(options, cb){
+                  window.__cfOpenPanelOnActionClick=!!(options&&options.openPanelOnActionClick);
+                  if(cb)cb();
+                };
+              }
+
               var popupPath = window.__cfActionPopup || ${JSONObject.quote(defaultPopupPath)};
               function setupActionApi(target){
                 if(!target.onClicked){
@@ -1614,7 +1811,7 @@ class MainActivity : AppCompatActivity() {
                 if(!target.setIcon){target.setIcon=function(_,cb){if(cb)cb();};}
                 if(!target.setPopup){target.setPopup=function(details,cb){popupPath=(details&&details.popup)||'';window.__cfActionPopup=popupPath;if(cb)cb();};}
                 if(!target.getPopup){target.getPopup=function(_,cb){if(cb)cb(popupPath||'');};}
-                if(!target.openPopup){target.openPopup=function(options,cb){try{if(window.ConsoleFlowHost)ConsoleFlowHost.openPopupFor(window.chrome.runtime.id);}catch(e){} if(cb)cb();};}
+                if(!target.openPopup){target.openPopup=function(options,cb){try{if(window.ConsoleFlowHost)ConsoleFlowHost.openPopupPathFor(window.chrome.runtime.id,popupPath||'');}catch(e){} if(cb)cb();};}
               }
               setupActionApi(window.chrome.action);
               setupActionApi(window.chrome.browserAction);
@@ -1803,6 +2000,50 @@ class MainActivity : AppCompatActivity() {
         fun openPopupFor(pluginId: String) {
             val plugin = findPlugin(pluginId) ?: return
             runOnUiThread { showPluginPopup(plugin) }
+        }
+
+        @JavascriptInterface
+        fun openPopupPathFor(pluginId: String, path: String) {
+            val plugin = findPlugin(pluginId) ?: return
+            runOnUiThread { showPluginPopup(plugin, path.ifBlank { plugin.popupPath }) }
+        }
+
+        @JavascriptInterface
+        fun openWindowFor(pluginId: String, url: String, type: String, width: Int, height: Int) {
+            val plugin = findPlugin(pluginId) ?: return
+            runOnUiThread {
+                val path = if (url.isNotBlank() && (!url.startsWith("http") || url.startsWith("https://chrome-extension.local/${plugin.id}/") || url.startsWith("chrome-extension://${plugin.id}/"))) {
+                    normalizeExtensionPath(plugin, url)
+                } else null
+                if (!path.isNullOrBlank() && type.lowercase() == "popup") {
+                    showPluginPopup(plugin, path)
+                } else if (!path.isNullOrBlank()) {
+                    openPluginPageInTab(plugin, path)
+                } else if (url.isNotBlank()) {
+                    createNewTab(url)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun openSidePanelFor(pluginId: String, path: String) {
+            val plugin = findPlugin(pluginId) ?: return
+            runOnUiThread { showPluginSidePanel(plugin, path.ifBlank { plugin.sidePanelPath ?: plugin.popupPath ?: plugin.optionsPage }) }
+        }
+
+        @JavascriptInterface
+        fun closeSidePanelFor(pluginId: String) {
+            findPlugin(pluginId) ?: return
+            runOnUiThread { closePluginSidePanel() }
+        }
+
+        @JavascriptInterface
+        fun closeExtensionSurfaceFor(pluginId: String) {
+            findPlugin(pluginId) ?: return
+            runOnUiThread {
+                activePluginPopup?.dismiss()
+                if (activeSidePanelPluginId == pluginId) closePluginSidePanel()
+            }
         }
     }
 }

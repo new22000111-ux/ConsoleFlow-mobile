@@ -128,6 +128,20 @@
             android:layout_height="match_parent" />
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
+
+    <FrameLayout
+        android:id="@+id/pluginSidePanelHost"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_margin="8dp"
+        android:background="@drawable/browser_popup_bg"
+        android:elevation="12dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/bottomBar"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/progressBar"
+        app:layout_constraintWidth_percent="0.50" />
+
     <!-- Fullscreen Video Container -->
     <FrameLayout
         android:id="@+id/fullscreenContainer"
