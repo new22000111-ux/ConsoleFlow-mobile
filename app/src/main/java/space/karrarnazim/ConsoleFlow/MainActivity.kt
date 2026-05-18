@@ -63,6 +63,8 @@ class MainActivity : AppCompatActivity() {
         val allowReadUrl: Boolean = true
     )
 
+    private var cachedPlugins: MutableList<BrowserPlugin>? = null
+
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var progressBar: ProgressBar
@@ -976,6 +978,7 @@ class MainActivity : AppCompatActivity() {
         }
         val clear = pluginManagerButton("Clear All") {
             prefsManager.pluginsJson = "[]"
+            cachedPlugins = mutableListOf()
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
             pluginBackgroundRuntimes.clear()
@@ -1992,6 +1995,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        cachedPlugins?.let { return it.toMutableList() }
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
@@ -2056,6 +2060,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = list.toMutableList()
         return list
     }
 
@@ -2083,6 +2088,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         prefsManager.pluginsJson = arr.toString()
+        cachedPlugins = plugins.toMutableList()
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
