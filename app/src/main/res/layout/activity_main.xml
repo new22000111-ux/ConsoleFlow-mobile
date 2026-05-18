@@ -95,6 +95,18 @@
         </HorizontalScrollView>
 
         <TextView
+            android:id="@+id/btnTabSwitcher"
+            android:layout_width="42dp"
+            android:layout_height="34dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/browser_icon_button_bg"
+            android:gravity="center"
+            android:text="1"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
             android:id="@+id/btnNewTab"
             android:layout_width="36dp"
             android:layout_height="34dp"

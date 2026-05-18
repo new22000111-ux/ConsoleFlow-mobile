@@ -31,6 +31,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
@@ -52,6 +53,7 @@ class MainActivity : AppCompatActivity() {
         val sidePanelPath: String? = null,
         val optionsPage: String? = null,
         val packageZipBase64: String? = null,
+        val packageFileName: String? = null,
         val enabled: Boolean,
         val deepAccess: Boolean,
         val allowToast: Boolean = true,
@@ -73,6 +75,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabsContainer: LinearLayout
     private lateinit var tabScroll: HorizontalScrollView
     private lateinit var btnNewTab: TextView
+    private lateinit var btnTabSwitcher: TextView
 
     private lateinit var prefsManager: PrefsManager
     private val client = OkHttpClient.Builder().followRedirects(false).build()
@@ -177,6 +180,7 @@ class MainActivity : AppCompatActivity() {
         tabsContainer = findViewById(R.id.tabsContainer)
         tabScroll = findViewById(R.id.tabScroll)
         btnNewTab = findViewById(R.id.btnNewTab)
+        btnTabSwitcher = findViewById(R.id.btnTabSwitcher)
 
         // Load current search engine favicon
         updateSearchEngineIcon()
@@ -409,6 +413,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.goHome).setOnClickListener { webView.loadUrl(HOME_URL) }
         findViewById<View>(R.id.btnConsole).setOnClickListener { toggleConsole() }
         btnNewTab.setOnClickListener { createNewTab(HOME_URL) }
+        btnTabSwitcher.setOnClickListener { showTabSwitcher() }
 
         btnBookmark.setOnClickListener {
             val url = webView.url ?: return@setOnClickListener
@@ -509,38 +514,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTabsUi() {
         tabsContainer.removeAllViews()
+        btnTabSwitcher.text = browserTabs.size.toString()
         browserTabs.forEachIndexed { index, tab ->
-            val chip = TextView(this).apply {
-                text = "${tab.title.ifBlank { readableTabTitle(tab.url) }.take(18)}  ×"
-                setTextColor(if (index == activeTabIndex) 0xFFFFFFFF.toInt() else 0xFFB7C3D4.toInt())
-                textSize = 13f
-                gravity = Gravity.CENTER
-                maxLines = 1
-                setPadding(dp(12), 0, dp(12), 0)
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), 0, dp(4), 0)
                 background = getDrawable(
                     if (index == activeTabIndex) R.drawable.browser_tab_active_bg
                     else R.drawable.browser_tab_inactive_bg
                 )
                 setOnClickListener { switchToTab(index) }
-                setOnTouchListener { view, event ->
-                    if (event.action == MotionEvent.ACTION_UP && event.x >= view.width - dp(34)) {
-                        closeTab(index)
-                        true
-                    } else {
-                        false
-                    }
-                }
-                setOnLongClickListener {
-                    closeTab(index)
-                    true
-                }
             }
-            val lp = LinearLayout.LayoutParams(dp(132), dp(32)).apply {
+            val title = TextView(this).apply {
+                text = tab.title.ifBlank { readableTabTitle(tab.url) }.take(18)
+                setTextColor(if (index == activeTabIndex) 0xFFFFFFFF.toInt() else 0xFFB7C3D4.toInt())
+                textSize = 13f
+                maxLines = 1
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val close = TextView(this).apply {
+                text = "×"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 20f
+                gravity = Gravity.CENTER
+                setOnClickListener { closeTab(index) }
+            }
+            chip.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+            chip.addView(close, LinearLayout.LayoutParams(dp(36), LinearLayout.LayoutParams.MATCH_PARENT))
+            val lp = LinearLayout.LayoutParams(dp(152), dp(34)).apply {
                 marginEnd = dp(6)
             }
             tabsContainer.addView(chip, lp)
         }
         tabScroll.post { tabScroll.fullScroll(HorizontalScrollView.FOCUS_RIGHT) }
+    }
+
+    private fun showTabSwitcher() {
+        val titles = browserTabs.mapIndexed { index, tab ->
+            val prefix = if (index == activeTabIndex) "✓ " else ""
+            "$prefix${tab.title.ifBlank { readableTabTitle(tab.url) }}\n${tab.url}"
+        }.toTypedArray()
+        AlertDialog.Builder(this, R.style.DarkDialog)
+            .setTitle("Tabs (${browserTabs.size})")
+            .setItems(titles) { _, which -> switchToTab(which) }
+            .setPositiveButton("New Tab") { _, _ -> createNewTab(HOME_URL) }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun readableTabTitle(url: String): String {
@@ -901,38 +921,152 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPluginsDialog() {
-        val plugins = getPlugins()
-        val labels = mutableListOf(
-            "➕ Add Plugin",
-            "🧩 Install from Chrome Store URL",
-            "🗑 Clear All Plugins"
-        )
-        labels.addAll(plugins.map { plugin ->
-            val status = if (plugin.enabled) "ON" else "OFF"
-            val health = if (pluginLastError[plugin.id] != null) "⚠" else "✓"
-            "$status $health • ${plugin.name} (${plugin.matchPattern})"
-        })
+        showPluginManagerPage()
+    }
 
-        AlertDialog.Builder(this, R.style.DarkDialog)
-            .setTitle("Plugin Manager")
-            .setItems(labels.toTypedArray()) { _, which ->
-                when (which) {
-                    0 -> showPluginEditor(null)
-                    1 -> showInstallFromChromeStoreDialog()
-                    2 -> {
-                        prefsManager.pluginsJson = "[]"
-                        Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
-                    }
-                    else -> {
-                        val pluginIndex = which - 3
-                        if (pluginIndex >= 0 && pluginIndex < plugins.size) {
-                            showPluginActions(plugins[pluginIndex])
-                        }
-                    }
-                }
+    private fun showPluginManagerPage() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0F1620.toInt())
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(10), 0)
+            setBackgroundColor(0xFF141D29.toInt())
+        }
+        val title = TextView(this).apply {
+            text = "Plugin Manager"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 20f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val add = TextView(this).apply {
+            text = "+"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 28f
+            gravity = Gravity.CENTER
+            background = getDrawable(R.drawable.browser_icon_button_bg)
+            setOnClickListener { showPluginEditorPage(null) { dialog.dismiss(); showPluginManagerPage() } }
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss() }
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(56), 1f))
+        header.addView(add, LinearLayout.LayoutParams(dp(44), dp(44)))
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(56)))
+        root.addView(header)
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), dp(10), dp(12), dp(6))
+        }
+        val install = pluginManagerButton("Install from Store URL") {
+            dialog.dismiss()
+            showInstallFromChromeStoreDialog()
+        }
+        val clear = pluginManagerButton("Clear All") {
+            prefsManager.pluginsJson = "[]"
+            clearPluginPackages()
+            pluginBackgroundRuntimes.values.forEach { it.destroy() }
+            pluginBackgroundRuntimes.clear()
+            closePluginSidePanel()
+            Toast.makeText(this, "All plugins removed", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+            showPluginManagerPage()
+        }
+        actions.addView(install, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(8) })
+        actions.addView(clear, LinearLayout.LayoutParams(0, dp(44), 1f))
+        root.addView(actions)
+
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(4), dp(12), dp(16))
+        }
+        val plugins = getPlugins()
+        if (plugins.isEmpty()) {
+            list.addView(TextView(this).apply {
+                text = "No plugins installed yet."
+                setTextColor(0xFFB7C3D4.toInt())
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(48), 0, dp(48))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        } else {
+            plugins.forEach { plugin ->
+                list.addView(createPluginManagerRow(plugin, dialog), LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(10) })
             }
-            .setNegativeButton("Close", null)
-            .show()
+        }
+        scroll.addView(list)
+        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        dialog.setContentView(root)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+        }
+        dialog.show()
+        dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+    }
+
+    private fun pluginManagerButton(label: String, onClick: () -> Unit): TextView {
+        return TextView(this).apply {
+            text = label
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+            gravity = Gravity.CENTER
+            background = getDrawable(R.drawable.browser_icon_button_bg)
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun createPluginManagerRow(plugin: BrowserPlugin, parentDialog: Dialog): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = getDrawable(R.drawable.browser_tab_inactive_bg)
+        }
+        val titleLine = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val name = TextView(this).apply {
+            text = plugin.name
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            maxLines = 1
+        }
+        val status = TextView(this).apply {
+            text = if (plugin.enabled) "ON" else "OFF"
+            setTextColor(if (plugin.enabled) 0xFF7CFFB2.toInt() else 0xFFFF8A8A.toInt())
+            textSize = 12f
+            gravity = Gravity.CENTER
+        }
+        titleLine.addView(name, LinearLayout.LayoutParams(0, dp(28), 1f))
+        titleLine.addView(status, LinearLayout.LayoutParams(dp(52), dp(28)))
+        row.addView(titleLine)
+        row.addView(TextView(this).apply {
+            text = plugin.matchPattern
+            setTextColor(0xFF8A93A2.toInt())
+            textSize = 12f
+            maxLines = 1
+        })
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+        val run = pluginManagerButton("Run") { runPluginFully(plugin) }
+        val edit = pluginManagerButton("Edit") { parentDialog.dismiss(); showPluginEditorPage(plugin) { showPluginManagerPage() } }
+        val more = pluginManagerButton("More") { showPluginActions(plugin) }
+        buttons.addView(run, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
+        buttons.addView(edit, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
+        buttons.addView(more, LinearLayout.LayoutParams(0, dp(40), 1f))
+        row.addView(buttons)
+        return row
     }
 
     private fun showInstallFromChromeStoreDialog() {
@@ -996,7 +1130,7 @@ class MainActivity : AppCompatActivity() {
                     popupPath = payload.popupPath,
                     sidePanelPath = payload.sidePanelPath,
                     optionsPage = payload.optionsPage,
-                    packageZipBase64 = Base64.encodeToString(zipBytes, Base64.NO_WRAP),
+                    packageFileName = writePluginPackage(payload.extensionId, zipBytes),
                     enabled = true,
                     deepAccess = false,
                     allowToast = true,
@@ -1049,6 +1183,7 @@ class MainActivity : AppCompatActivity() {
                 .show()
         })
         actions.add("Delete" to {
+            deletePluginPackage(plugin)
             removePlugin(plugin.id)
             pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
             pluginLastError.remove(plugin.id)
@@ -1094,12 +1229,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensureBackgroundRuntime(plugin: BrowserPlugin) {
         if (pluginBackgroundRuntimes.containsKey(plugin.id)) return
-        val encodedZip = plugin.packageZipBase64 ?: return
-        val zipBytes = try {
-            Base64.decode(encodedZip, Base64.DEFAULT)
-        } catch (_: Exception) {
-            return
-        }
+        val zipBytes = readPluginPackageBytes(plugin) ?: return
         val manifest = ChromeExtensionInstaller.readManifest(zipBytes) ?: return
         val backgroundPaths = ChromeExtensionInstaller.collectBackgroundScriptPaths(manifest)
         if (backgroundPaths.isEmpty()) return
@@ -1167,10 +1297,9 @@ class MainActivity : AppCompatActivity() {
             val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
             if (extensionId.isNotBlank() && path.isNotBlank()) {
                 val plugin = findPlugin(extensionId)
-                val zipBase64 = plugin?.packageZipBase64
-                if (!zipBase64.isNullOrBlank()) {
+                val zipBytes = plugin?.let { readPluginPackageBytes(it) }
+                if (zipBytes != null) {
                     return try {
-                        val zipBytes = Base64.decode(zipBase64, Base64.DEFAULT)
                         val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
                         if (fileBytes != null) {
                             WebResourceResponse(
@@ -1236,7 +1365,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensurePluginPackage(plugin: BrowserPlugin): Boolean {
-        if (plugin.packageZipBase64.isNullOrBlank()) {
+        if (readPluginPackageBytes(plugin) == null) {
             Toast.makeText(this, "Plugin package files are missing", Toast.LENGTH_SHORT).show()
             return false
         }
@@ -1448,77 +1577,165 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPluginEditor(existing: BrowserPlugin?) {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(36, 20, 36, 8)
-        }
+        showPluginEditorPage(existing)
+    }
 
-        val nameInput = EditText(this).apply {
-            hint = "Plugin name"
-            setText(existing?.name ?: "")
+    private fun showPluginEditorPage(existing: BrowserPlugin?, onDone: (() -> Unit)? = null) {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0F1620.toInt())
         }
-        val matchInput = EditText(this).apply {
-            hint = "Match host/path (example: github.com or *)"
-            setText(existing?.matchPattern ?: "*")
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(10), 0)
+            setBackgroundColor(0xFF141D29.toInt())
         }
-        val scriptInput = EditText(this).apply {
-            hint = "JavaScript code (use ConsoleFlowApi.toast/copyToClipboard/shareText/openExternal/currentUrl)"
-            setText(existing?.script ?: "")
-            isSingleLine = false
-            minLines = 8
+        val title = TextView(this).apply {
+            text = if (existing == null) "Create Plugin" else "Edit Plugin"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 20f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val save = pluginManagerButton("Save") {
+            // replaced below after inputs are created
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss(); onDone?.invoke() }
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(56), 1f))
+        header.addView(save, LinearLayout.LayoutParams(dp(84), dp(42)).apply { marginEnd = dp(8) })
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(56)))
+        root.addView(header)
+
+        val scroll = ScrollView(this)
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(18))
+        }
+        val nameInput = pluginEditText("Plugin name", existing?.name ?: "", singleLine = true)
+        val matchInput = pluginEditText("Match host/path (example: github.com or *)", existing?.matchPattern ?: "*", singleLine = true)
+        val scriptInput = pluginEditText(
+            "JavaScript code (ConsoleFlowApi.toast/copyToClipboard/shareText/openExternal/currentUrl)",
+            existing?.script ?: "",
+            singleLine = false
+        ).apply {
+            minLines = 14
+            gravity = Gravity.TOP or Gravity.START
         }
         val deepAccessSwitch = Switch(this).apply {
             text = "Deep host access (Clipboard/Share/Open app/Toast)"
+            setTextColor(0xFFFFFFFF.toInt())
             isChecked = existing?.deepAccess ?: false
         }
         val enabledSwitch = Switch(this).apply {
             text = "Enabled"
+            setTextColor(0xFFFFFFFF.toInt())
             isChecked = existing?.enabled ?: true
         }
+        form.addView(nameInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply { bottomMargin = dp(10) })
+        form.addView(matchInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply { bottomMargin = dp(10) })
+        form.addView(scriptInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(360)).apply { bottomMargin = dp(12) })
+        form.addView(deepAccessSwitch)
+        form.addView(enabledSwitch)
+        scroll.addView(form)
+        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        container.addView(nameInput)
-        container.addView(matchInput)
-        container.addView(scriptInput)
-        container.addView(deepAccessSwitch)
-        container.addView(enabledSwitch)
-
-        AlertDialog.Builder(this, R.style.DarkDialog)
-            .setTitle(if (existing == null) "Create Plugin" else "Edit Plugin")
-            .setView(container)
-            .setPositiveButton("Save") { _, _ ->
-                val name = nameInput.text.toString().trim().ifEmpty { "Plugin" }
-                val match = matchInput.text.toString().trim().ifEmpty { "*" }
-                val script = scriptInput.text.toString()
-                if (script.isBlank()) {
-                    Toast.makeText(this, "Script cannot be empty", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                val plugin = BrowserPlugin(
-                    id = existing?.id ?: System.currentTimeMillis().toString(),
-                    name = name,
-                    matchPattern = match,
-                    script = script,
-                    popupPath = existing?.popupPath,
-                    sidePanelPath = existing?.sidePanelPath,
-                    optionsPage = existing?.optionsPage,
-                    packageZipBase64 = existing?.packageZipBase64,
-                    enabled = enabledSwitch.isChecked,
-                    deepAccess = deepAccessSwitch.isChecked,
-                    allowToast = existing?.allowToast ?: true,
-                    allowClipboard = existing?.allowClipboard ?: false,
-                    allowShare = existing?.allowShare ?: false,
-                    allowOpenExternal = existing?.allowOpenExternal ?: false,
-                    allowReadUrl = existing?.allowReadUrl ?: true
-                )
-                upsertPlugin(plugin)
-                Toast.makeText(this, "Plugin saved", Toast.LENGTH_SHORT).show()
+        save.setOnClickListener {
+            val name = nameInput.text.toString().trim().ifEmpty { "Plugin" }
+            val match = matchInput.text.toString().trim().ifEmpty { "*" }
+            val script = scriptInput.text.toString()
+            if (script.isBlank()) {
+                Toast.makeText(this, "Script cannot be empty", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            val plugin = BrowserPlugin(
+                id = existing?.id ?: System.currentTimeMillis().toString(),
+                name = name,
+                matchPattern = match,
+                script = script,
+                popupPath = existing?.popupPath,
+                sidePanelPath = existing?.sidePanelPath,
+                optionsPage = existing?.optionsPage,
+                packageZipBase64 = existing?.packageZipBase64,
+                packageFileName = existing?.packageFileName,
+                enabled = enabledSwitch.isChecked,
+                deepAccess = deepAccessSwitch.isChecked,
+                allowToast = existing?.allowToast ?: true,
+                allowClipboard = existing?.allowClipboard ?: false,
+                allowShare = existing?.allowShare ?: false,
+                allowOpenExternal = existing?.allowOpenExternal ?: false,
+                allowReadUrl = existing?.allowReadUrl ?: true
+            )
+            upsertPlugin(plugin)
+            Toast.makeText(this, "Plugin saved", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+            onDone?.invoke()
+        }
+
+        dialog.setContentView(root)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+    }
+
+    private fun pluginEditText(hintText: String, value: String, singleLine: Boolean): EditText {
+        return EditText(this).apply {
+            hint = hintText
+            setText(value)
+            setTextColor(0xFFFFFFFF.toInt())
+            setHintTextColor(0xFF8A93A2.toInt())
+            setBackgroundColor(0xFF151E2A.toInt())
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            isSingleLine = singleLine
+        }
+    }
+
+    private fun pluginPackagesDir(): File {
+        return File(filesDir, "plugin_packages").apply { mkdirs() }
+    }
+
+    private fun writePluginPackage(pluginId: String, zipBytes: ByteArray): String {
+        val safeId = pluginId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        val file = File(pluginPackagesDir(), "$safeId.zip")
+        file.writeBytes(zipBytes)
+        return file.name
+    }
+
+    private fun readPluginPackageBytes(plugin: BrowserPlugin): ByteArray? {
+        plugin.packageFileName?.takeIf { it.isNotBlank() }?.let { fileName ->
+            val file = File(pluginPackagesDir(), fileName)
+            if (file.exists()) return file.readBytes()
+        }
+        return plugin.packageZipBase64?.takeIf { it.isNotBlank() }?.let { encoded ->
+            try { Base64.decode(encoded, Base64.DEFAULT) } catch (_: Exception) { null }
+        }
+    }
+
+    private fun deletePluginPackage(plugin: BrowserPlugin) {
+        plugin.packageFileName?.takeIf { it.isNotBlank() }?.let { fileName ->
+            File(pluginPackagesDir(), fileName).delete()
+        }
+    }
+
+    private fun clearPluginPackages() {
+        pluginPackagesDir().listFiles()?.forEach { it.delete() }
+    }
+
+    private fun isUnresolvedExtensionName(name: String): Boolean {
+        return name.matches(Regex("__MSG_[A-Za-z0-9_@.-]+__", RegexOption.IGNORE_CASE)) ||
+                (name.startsWith("_") && name.endsWith("_") && name.length > 2)
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
         val list = mutableListOf<BrowserPlugin>()
+        var migratedPackages = false
         val arr = try {
             JSONArray(prefsManager.pluginsJson)
         } catch (e: Exception) {
@@ -1527,16 +1744,47 @@ class MainActivity : AppCompatActivity() {
         for (i in 0 until arr.length()) {
             try {
                 val obj = arr.getJSONObject(i)
+                val id = obj.optString("id", System.currentTimeMillis().toString())
+                val legacyBase64 = obj.optString("packageZipBase64", "").ifBlank { null }
+                var packageFileName = obj.optString("packageFileName", "").ifBlank { null }
+                if (packageFileName.isNullOrBlank() && !legacyBase64.isNullOrBlank()) {
+                    try {
+                        packageFileName = writePluginPackage(id, Base64.decode(legacyBase64, Base64.DEFAULT))
+                        migratedPackages = true
+                    } catch (_: Exception) {
+                    }
+                }
+                var name = obj.optString("name", "Plugin")
+                if (isUnresolvedExtensionName(name) && !packageFileName.isNullOrBlank()) {
+                    readPluginPackageBytes(
+                        BrowserPlugin(
+                            id = id,
+                            name = name,
+                            matchPattern = "*",
+                            script = "",
+                            packageFileName = packageFileName,
+                            enabled = true,
+                            deepAccess = false
+                        )
+                    )?.let { zipBytes ->
+                        val resolvedName = ChromeExtensionInstaller.resolveExtensionName(zipBytes, name)
+                        if (resolvedName != name && !isUnresolvedExtensionName(resolvedName)) {
+                            name = resolvedName
+                            migratedPackages = true
+                        }
+                    }
+                }
                 list.add(
                     BrowserPlugin(
-                        id = obj.optString("id", System.currentTimeMillis().toString()),
-                        name = obj.optString("name", "Plugin"),
+                        id = id,
+                        name = name,
                         matchPattern = obj.optString("matchPattern", "*"),
                         script = obj.optString("script", ""),
                         popupPath = obj.optString("popupPath", "").ifBlank { null },
                         sidePanelPath = obj.optString("sidePanelPath", "").ifBlank { null },
                         optionsPage = obj.optString("optionsPage", "").ifBlank { null },
-                        packageZipBase64 = obj.optString("packageZipBase64", "").ifBlank { null },
+                        packageZipBase64 = null,
+                        packageFileName = packageFileName,
                         enabled = obj.optBoolean("enabled", true),
                         deepAccess = obj.optBoolean("deepAccess", false),
                         allowToast = obj.optBoolean("allowToast", true),
@@ -1549,6 +1797,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        if (migratedPackages) savePlugins(list)
         return list
     }
 
@@ -1564,7 +1813,7 @@ class MainActivity : AppCompatActivity() {
                     put("popupPath", plugin.popupPath ?: "")
                     put("sidePanelPath", plugin.sidePanelPath ?: "")
                     put("optionsPage", plugin.optionsPage ?: "")
-                    put("packageZipBase64", plugin.packageZipBase64 ?: "")
+                    put("packageFileName", plugin.packageFileName ?: "")
                     put("enabled", plugin.enabled)
                     put("deepAccess", plugin.deepAccess)
                     put("allowToast", plugin.allowToast)
@@ -1586,7 +1835,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun removePlugin(id: String) {
-        val plugins = getPlugins().filter { it.id != id }
+        val currentPlugins = getPlugins()
+        currentPlugins.firstOrNull { it.id == id }?.let { deletePluginPackage(it) }
+        val plugins = currentPlugins.filter { it.id != id }
         savePlugins(plugins)
     }
 

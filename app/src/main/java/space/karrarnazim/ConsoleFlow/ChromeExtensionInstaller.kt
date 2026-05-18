@@ -106,7 +106,7 @@ object ChromeExtensionInstaller {
 
         val manifestRaw = files["manifest.json"] ?: throw IllegalStateException("manifest.json not found")
         val manifest = JSONObject(manifestRaw)
-        val name = manifest.optString("name", "Chrome Extension $extensionId")
+        val name = resolveExtensionName(manifest, files, "Chrome Extension $extensionId")
         val contentScripts = manifest.optJSONArray("content_scripts") ?: JSONArray()
         val scriptBuilder = StringBuilder()
         var matchPattern = "*"
@@ -169,6 +169,63 @@ object ChromeExtensionInstaller {
             sidePanelPath = sidePanelPath,
             optionsPage = optionsPage
         )
+    }
+
+
+    fun resolveExtensionName(zipBytes: ByteArray, fallback: String): String {
+        val files = mutableMapOf<String, String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory && (entry.name == "manifest.json" || entry.name.matches(Regex("_locales/[^/]+/messages\\.json")))) {
+                    val data = ByteArrayOutputStream()
+                    val buffer = ByteArray(4096)
+                    var len = zip.read(buffer)
+                    while (len > 0) {
+                        data.write(buffer, 0, len)
+                        len = zip.read(buffer)
+                    }
+                    files[entry.name] = data.toString(Charsets.UTF_8.name())
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        val manifest = files["manifest.json"]?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?: return fallback
+        return resolveExtensionName(manifest, files, fallback)
+    }
+
+    private fun resolveExtensionName(manifest: JSONObject, files: Map<String, String>, fallback: String): String {
+        val rawName = manifest.optString("name", fallback).ifBlank { fallback }
+        return resolveManifestMessage(rawName, manifest, files).ifBlank { fallback }
+    }
+
+    private fun resolveManifestMessage(value: String, manifest: JSONObject, files: Map<String, String>): String {
+        val match = Regex("^__MSG_([A-Za-z0-9_@.-]+)__$").matchEntire(value.trim()) ?: return value
+        val key = match.groupValues[1]
+        val localeCandidates = buildList {
+            manifest.optString("default_locale").takeIf { it.isNotBlank() }?.let { add(it) }
+            add("en_US")
+            add("en")
+            files.keys
+                .filter { it.startsWith("_locales/") && it.endsWith("/messages.json") }
+                .map { it.removePrefix("_locales/").substringBefore('/') }
+                .forEach { if (!contains(it)) add(it) }
+        }
+
+        for (locale in localeCandidates) {
+            val messagesRaw = files["_locales/$locale/messages.json"] ?: continue
+            val messages = runCatching { JSONObject(messagesRaw) }.getOrNull() ?: continue
+            val messageObject = messages.optJSONObject(key)
+                ?: messages.keys().asSequence()
+                    .firstOrNull { it.equals(key, ignoreCase = true) }
+                    ?.let { messages.optJSONObject(it) }
+            val message = messageObject?.optString("message")?.takeIf { it.isNotBlank() }
+            if (!message.isNullOrBlank()) return message
+        }
+
+        return value
     }
 
     private fun normalizeChromeMatch(matchPattern: String): String {
