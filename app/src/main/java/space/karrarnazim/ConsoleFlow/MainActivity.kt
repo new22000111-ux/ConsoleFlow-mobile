@@ -103,6 +103,8 @@ class MainActivity : AppCompatActivity() {
     private val pluginLastError = mutableMapOf<String, String>()
     private val pluginMessageCatalogs = ConcurrentHashMap<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
+    private val pluginBackgroundRuntimeReady = ConcurrentHashMap.newKeySet<String>()
+    private val pendingRuntimeMessageTargets = ConcurrentHashMap<String, WebView>()
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -201,7 +203,7 @@ class MainActivity : AppCompatActivity() {
         updateUserAgent()
 
         webView.addJavascriptInterface(SearchBridge(), "Android")
-        webView.addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
+        webView.addJavascriptInterface(PluginBridge().apply { sourceWebView = webView }, "ConsoleFlowHost")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -1296,6 +1298,7 @@ class MainActivity : AppCompatActivity() {
             removePlugin(plugin.id)
             pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
             pluginLastError.remove(plugin.id)
+            pluginMessageCatalogs.remove(plugin.id)
             if (activeSidePanelPluginId == plugin.id) closePluginSidePanel()
             Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
         })
@@ -1356,8 +1359,10 @@ class MainActivity : AppCompatActivity() {
         val runtimeWebView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            val bridge = PluginBridge()
             addJavascriptInterface(SearchBridge(), "Android")
-            addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
+            addJavascriptInterface(bridge, "ConsoleFlowHost")
+            bridge.sourceWebView = this
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
@@ -1375,6 +1380,8 @@ class MainActivity : AppCompatActivity() {
                         val normalized = result?.trim('"') ?: ""
                         if (normalized.contains("\"ok\":false")) {
                             pluginLastError[plugin.id] = "Background runtime: $normalized"
+                        } else {
+                            pluginBackgroundRuntimeReady.add(plugin.id)
                         }
                     }
                 }
@@ -1510,6 +1517,37 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
+    private fun proxyExtensionNetworkRequest(request: WebResourceRequest): WebResourceResponse? {
+        val url = request.url.toString()
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+        if (request.url.host == "chrome-extension.local" || request.url.host == "eruda.local") return null
+        if (request.method != "GET") return null
+
+        return try {
+            val proxied = Request.Builder().url(url).apply {
+                request.requestHeaders.forEach { (name, value) ->
+                    if (!name.equals("Host", ignoreCase = true)) addHeader(name, value)
+                }
+            }.build()
+            val response = extensionDownloadClient.newCall(proxied).execute()
+            val contentType = response.header("Content-Type") ?: guessMimeType(url)
+            WebResourceResponse(
+                contentType.substringBefore(';'),
+                response.header("Content-Encoding") ?: "utf-8",
+                response.code,
+                response.message.ifBlank { "OK" },
+                response.headers.toMap().toMutableMap().apply {
+                    this["Access-Control-Allow-Origin"] = "*"
+                    this["Access-Control-Allow-Headers"] = "*"
+                    this["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+                },
+                response.body?.byteStream() ?: ByteArrayInputStream(ByteArray(0))
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun createExtensionPageWebView(plugin: BrowserPlugin, closeScript: String): WebView {
         return WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -1517,12 +1555,17 @@ class MainActivity : AppCompatActivity() {
             settings.databaseEnabled = true
             settings.allowFileAccess = true
             settings.allowContentAccess = true
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             setBackgroundColor(0xFF111820.toInt())
+            val bridge = PluginBridge()
             addJavascriptInterface(SearchBridge(), "Android")
-            addJavascriptInterface(PluginBridge(), "ConsoleFlowHost")
+            addJavascriptInterface(bridge, "ConsoleFlowHost")
+            bridge.sourceWebView = this
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                    return serveLocalBrowserRequest(request) ?: super.shouldInterceptRequest(view, request)
+                    return serveLocalBrowserRequest(request)
+                        ?: proxyExtensionNetworkRequest(request)
+                        ?: super.shouldInterceptRequest(view, request)
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -1576,26 +1619,103 @@ class MainActivity : AppCompatActivity() {
             loadUrl(buildExtensionPageUrl(plugin, popupPath))
         }
 
-        val width = minOf(dp(420), (resources.displayMetrics.widthPixels * 0.92f).toInt()).coerceAtLeast(dp(220))
-        val height = minOf(dp(560), (resources.displayMetrics.heightPixels * 0.72f).toInt()).coerceAtLeast(dp(180))
-        val container = FrameLayout(this).apply {
+        val width = minOf(dp(440), (resources.displayMetrics.widthPixels * 0.94f).toInt()).coerceAtLeast(dp(260))
+        val expandedHeight = minOf(dp(600), (resources.displayMetrics.heightPixels * 0.78f).toInt()).coerceAtLeast(dp(240))
+        val minimizedHeight = dp(48)
+        var popupX = dp(10)
+        var popupY = dp(106)
+        var minimized = false
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             background = getDrawable(R.drawable.browser_popup_bg)
             setPadding(dp(1), dp(1), dp(1), dp(1))
-            addView(popupWebView, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            ))
         }
-        activePluginPopup = PopupWindow(container, width, height, true).apply {
-            isOutsideTouchable = true
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(4), 0)
+            setBackgroundColor(0xFF151E2A.toInt())
+        }
+        val title = TextView(this).apply {
+            text = plugin.name
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 13f
+            maxLines = 1
+        }
+        val move = TextView(this).apply {
+            text = "⇄"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 20f
+            gravity = Gravity.CENTER
+        }
+        val minimize = TextView(this).apply {
+            text = "–"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 24f
+            gravity = Gravity.CENTER
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 24f
+            gravity = Gravity.CENTER
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(46), 1f))
+        header.addView(move, LinearLayout.LayoutParams(dp(44), dp(46)))
+        header.addView(minimize, LinearLayout.LayoutParams(dp(44), dp(46)))
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(46)))
+        container.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
+        container.addView(popupWebView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
+
+        activePluginPopup = PopupWindow(container, width, expandedHeight, false).apply {
+            isOutsideTouchable = false
             setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
             elevation = dp(10).toFloat()
             setOnDismissListener {
                 popupWebView.destroy()
                 if (activePluginPopup === this) activePluginPopup = null
             }
-            showAtLocation(webView, Gravity.TOP or Gravity.END, dp(10), dp(106))
+            showAtLocation(webView, Gravity.TOP or Gravity.END, popupX, popupY)
         }
+
+        var dragStartRawX = 0f
+        var dragStartRawY = 0f
+        var dragStartX = 0
+        var dragStartY = 0
+        header.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragStartRawX = event.rawX
+                    dragStartRawY = event.rawY
+                    dragStartX = popupX
+                    dragStartY = popupY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    popupX = (dragStartX - (event.rawX - dragStartRawX).toInt()).coerceAtLeast(0)
+                    popupY = (dragStartY + (event.rawY - dragStartRawY).toInt()).coerceAtLeast(dp(64))
+                    activePluginPopup?.update(popupX, popupY, width, if (minimized) minimizedHeight else expandedHeight)
+                    true
+                }
+                else -> false
+            }
+        }
+        move.setOnClickListener {
+            popupX = if (popupX < resources.displayMetrics.widthPixels / 4) dp(10) else resources.displayMetrics.widthPixels - width - dp(10)
+            activePluginPopup?.update(popupX, popupY, width, if (minimized) minimizedHeight else expandedHeight)
+        }
+        minimize.setOnClickListener {
+            minimized = !minimized
+            popupWebView.visibility = if (minimized) View.GONE else View.VISIBLE
+            minimize.text = if (minimized) "□" else "–"
+            activePluginPopup?.update(popupX, popupY, width, if (minimized) minimizedHeight else expandedHeight)
+        }
+        close.setOnClickListener { activePluginPopup?.dismiss() }
     }
 
     private fun showPluginSidePanel(plugin: BrowserPlugin, path: String? = plugin.sidePanelPath ?: plugin.popupPath ?: plugin.optionsPage) {
@@ -1968,13 +2088,21 @@ class MainActivity : AppCompatActivity() {
     private fun upsertPlugin(plugin: BrowserPlugin) {
         val plugins = getPlugins()
         val existingIndex = plugins.indexOfFirst { it.id == plugin.id }
-        if (existingIndex >= 0) plugins[existingIndex] = plugin else plugins.add(plugin)
+        if (existingIndex >= 0) {
+            pluginBackgroundRuntimeReady.remove(plugin.id)
+            pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
+            plugins[existingIndex] = plugin
+        } else {
+            plugins.add(plugin)
+        }
         savePlugins(plugins)
     }
 
     private fun removePlugin(id: String) {
         val currentPlugins = getPlugins()
         currentPlugins.firstOrNull { it.id == id }?.let { deletePluginPackage(it) }
+        pluginBackgroundRuntimeReady.remove(id)
+        pluginBackgroundRuntimes.remove(id)?.destroy()
         val plugins = currentPlugins.filter { it.id != id }
         savePlugins(plugins)
     }
@@ -2110,17 +2238,55 @@ class MainActivity : AppCompatActivity() {
                 if(!window.__cfExtBus.listeners[channel]) window.__cfExtBus.listeners[channel]=[];
                 window.__cfExtBus.listeners[channel].push(fn);
               }
-              function emit(channel, payload){
+              function emit(channel, payload, sender, sendResponse){
                 var list=(window.__cfExtBus.listeners[channel]||[]).slice();
+                var handled=false;
                 list.forEach(function(fn){
-                  try{ fn(payload,function(){}); }catch(e){}
+                  try{
+                    var ret=fn(payload, sender||{id:window.chrome&&window.chrome.runtime&&window.chrome.runtime.id,url:location.href}, function(response){handled=true;if(sendResponse)sendResponse(response);});
+                    if(ret && typeof ret.then==='function'){
+                      handled=true;
+                      ret.then(function(response){if(sendResponse)sendResponse(response);}).catch(function(error){if(sendResponse)sendResponse({error:String(error)});});
+                    }else if(ret!==undefined && ret!==true){
+                      handled=true;
+                      if(sendResponse)sendResponse(ret);
+                    }else if(ret===true){
+                      handled=true;
+                    }
+                  }catch(e){handled=true;if(sendResponse)sendResponse({error:String(e)});}
                 });
+                return handled;
               }
+              if(!window.__cfRuntimeMessageCallbacks){window.__cfRuntimeMessageCallbacks={};}
+              window.__cfResolveRuntimeMessage=function(callbackId, responseJson){
+                var cb=window.__cfRuntimeMessageCallbacks&&window.__cfRuntimeMessageCallbacks[callbackId];
+                if(!cb)return;
+                delete window.__cfRuntimeMessageCallbacks[callbackId];
+                var response=null;
+                try{response=JSON.parse(responseJson||'null');}catch(e){response=null;}
+                try{cb(response);}catch(e){}
+              };
+              window.__cfDispatchRuntimeMessage=function(messageJson, senderJson, callbackId){
+                var message=null;
+                var sender={id:window.chrome&&window.chrome.runtime&&window.chrome.runtime.id,url:location.href};
+                try{message=JSON.parse(messageJson||'null');}catch(e){}
+                try{sender=JSON.parse(senderJson||'{}')||sender;}catch(e){}
+                var responded=false;
+                function sendResponse(response){
+                  if(responded)return;
+                  responded=true;
+                  try{if(window.ConsoleFlowHost)ConsoleFlowHost.completeRuntimeMessageFor(window.chrome.runtime.id, callbackId||'', JSON.stringify(response===undefined?null:response));}catch(e){}
+                }
+                var handled=emit('runtime:onMessage', message, sender, sendResponse);
+                if(!handled){sendResponse(null);}
+                return true;
+              };
             
               if(!window.chrome){window.chrome={};}
               if(!window.chrome.runtime){window.chrome.runtime={};}
               if(!window.chrome.storage){window.chrome.storage={};}
               if(!window.chrome.tabs){window.chrome.tabs={};}
+              if(!window.chrome.scripting){window.chrome.scripting={};}
               if(!window.chrome.action){window.chrome.action={};}
               if(!window.chrome.browserAction){window.chrome.browserAction={};}
               if(!window.chrome.sidePanel){window.chrome.sidePanel={};}
@@ -2200,22 +2366,100 @@ class MainActivity : AppCompatActivity() {
                 };
               }
               if(!window.chrome.runtime.sendMessage){
-                window.chrome.runtime.sendMessage=function(message,cb){
-                  var payload={message:message,sender:{id:window.chrome.runtime.id,url:location.href}};
-                  emit('runtime:onMessage', payload);
-                  if(cb)cb({ok:true,delivered:true});
+                window.chrome.runtime.sendMessage=function(extensionIdOrMessage, messageOrOptions, optionsOrCallback){
+                  var message=extensionIdOrMessage;
+                  var cb=null;
+                  if(typeof extensionIdOrMessage==='string'){
+                    message=messageOrOptions;
+                    cb=(typeof optionsOrCallback==='function')?optionsOrCallback:null;
+                  }else{
+                    cb=(typeof messageOrOptions==='function')?messageOrOptions:((typeof optionsOrCallback==='function')?optionsOrCallback:null);
+                  }
+                  var callbackId='rt_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                  var promise=null;
+                  if(cb){window.__cfRuntimeMessageCallbacks[callbackId]=cb;}
+                  else{
+                    promise=new Promise(function(resolve){window.__cfRuntimeMessageCallbacks[callbackId]=resolve;});
+                  }
+                  try{
+                    if(window.ConsoleFlowHost){
+                      ConsoleFlowHost.sendRuntimeMessageFor(window.chrome.runtime.id, JSON.stringify(message===undefined?null:message), location.href, callbackId);
+                    }else{
+                      window.__cfDispatchRuntimeMessage(JSON.stringify(message===undefined?null:message), JSON.stringify({id:window.chrome.runtime.id,url:location.href}), callbackId);
+                    }
+                  }catch(e){
+                    window.__cfResolveRuntimeMessage(callbackId, JSON.stringify({error:String(e)}));
+                  }
+                  return promise;
                 };
               }
             
               if(!window.chrome.tabs.query){
                 window.chrome.tabs.query=function(queryInfo, cb){
-                  var tab={id:1,active:true,currentWindow:true,url:location.href,title:document.title||''};
-                  if(cb)cb([tab]);
+                  var fallback=[{id:1,active:true,currentWindow:true,url:location.href,title:document.title||''}];
+                  try{
+                    if(window.ConsoleFlowHost){fallback=JSON.parse(ConsoleFlowHost.activeTabsJsonFor(window.chrome.runtime.id, JSON.stringify(queryInfo||{}))||'[]');}
+                  }catch(e){}
+                  if(cb)cb(fallback);
+                  return Promise.resolve(fallback);
                 };
               }
               if(!window.chrome.tabs.sendMessage){
-                window.chrome.tabs.sendMessage=function(tabId, message, cb){
-                  window.chrome.runtime.sendMessage({tabId:tabId,message:message}, cb);
+                window.chrome.tabs.sendMessage=function(tabId, message, optionsOrCallback){
+                  var cb=(typeof optionsOrCallback==='function')?optionsOrCallback:null;
+                  var callbackId='tab_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                  var promise=null;
+                  if(cb){window.__cfRuntimeMessageCallbacks[callbackId]=cb;}
+                  else{promise=new Promise(function(resolve){window.__cfRuntimeMessageCallbacks[callbackId]=resolve;});}
+                  try{
+                    if(window.ConsoleFlowHost){ConsoleFlowHost.sendTabMessageFor(window.chrome.runtime.id, Number(tabId)||1, JSON.stringify(message===undefined?null:message), location.href, callbackId);}
+                  }catch(e){window.__cfResolveRuntimeMessage(callbackId, JSON.stringify({error:String(e)}));}
+                  return promise;
+                };
+              }
+              function cfCallbackOrPromise(prefix, cb){
+                var callbackId=prefix + Date.now() + '_' + Math.random().toString(36).slice(2);
+                var promise=null;
+                if(cb){window.__cfRuntimeMessageCallbacks[callbackId]=cb;}
+                else{promise=new Promise(function(resolve){window.__cfRuntimeMessageCallbacks[callbackId]=resolve;});}
+                return {id:callbackId,promise:promise};
+              }
+              if(!window.chrome.scripting.executeScript){
+                window.chrome.scripting.executeScript=function(injection, cb){
+                  injection=injection||{};
+                  var holder=cfCallbackOrPromise('script_', cb);
+                  var code='';
+                  try{
+                    var fn=injection.func||injection.function;
+                    if(fn){code='var __cfResult=(' + fn.toString() + ').apply(null,' + JSON.stringify(injection.args||[]) + ');';}
+                    else if(injection.code){code=String(injection.code);}
+                    if(window.ConsoleFlowHost){ConsoleFlowHost.executeScriptFor(window.chrome.runtime.id, code, JSON.stringify(injection.files||[]), holder.id);}
+                  }catch(e){window.__cfResolveRuntimeMessage(holder.id, JSON.stringify({error:String(e)}));}
+                  return holder.promise;
+                };
+              }
+              if(!window.chrome.scripting.insertCSS){
+                window.chrome.scripting.insertCSS=function(injection, cb){
+                  injection=injection||{};
+                  var holder=cfCallbackOrPromise('css_', cb);
+                  try{
+                    if(window.ConsoleFlowHost){ConsoleFlowHost.insertCssFor(window.chrome.runtime.id, String(injection.css||''), JSON.stringify(injection.files||[]), holder.id);}
+                  }catch(e){window.__cfResolveRuntimeMessage(holder.id, JSON.stringify({error:String(e)}));}
+                  return holder.promise;
+                };
+              }
+              if(!window.chrome.tabs.executeScript){
+                window.chrome.tabs.executeScript=function(tabId, details, cb){
+                  if(typeof tabId==='object'){cb=details;details=tabId;}
+                  details=details||{};
+                  return window.chrome.scripting.executeScript({target:{tabId:1},files:details.file?[details.file]:(details.files||[]),code:details.code}, cb);
+                };
+              }
+              if(!window.chrome.tabs.insertCSS){
+                window.chrome.tabs.insertCSS=function(tabId, details, cb){
+                  if(typeof tabId==='object'){cb=details;details=tabId;}
+                  details=details||{};
+                  return window.chrome.scripting.insertCSS({target:{tabId:1},files:details.file?[details.file]:(details.files||[]),css:details.code||details.css||''}, cb);
                 };
               }
               if(!window.chrome.tabs.create){
@@ -2246,6 +2490,14 @@ class MainActivity : AppCompatActivity() {
               if(!window.chrome.windows.remove){
                 window.chrome.windows.remove=function(windowId, cb){try{if(window.ConsoleFlowHost)ConsoleFlowHost.closeExtensionSurfaceFor(window.chrome.runtime.id);}catch(e){} if(cb)cb();};
               }
+
+
+              if(!window.chrome.contextMenus){window.chrome.contextMenus={};}
+              if(!window.chrome.contextMenus.create){window.chrome.contextMenus.create=function(info, cb){if(cb)cb(info&&info.id); return info&&info.id;};}
+              if(!window.chrome.contextMenus.update){window.chrome.contextMenus.update=function(id, info, cb){if(cb)cb();};}
+              if(!window.chrome.contextMenus.remove){window.chrome.contextMenus.remove=function(id, cb){if(cb)cb();};}
+              if(!window.chrome.contextMenus.removeAll){window.chrome.contextMenus.removeAll=function(cb){if(cb)cb();};}
+              if(!window.chrome.contextMenus.onClicked){window.chrome.contextMenus.onClicked={addListener:function(fn){ addListener('contextMenus:onClicked', fn); }};}
 
               var sidePanelPath = window.__cfSidePanelPath || ${JSONObject.quote(defaultSidePanelPath)};
               if(!window.chrome.sidePanel.setOptions){
@@ -2396,7 +2648,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun dispatchRuntimeMessageToWebView(target: WebView, plugin: BrowserPlugin, messageJson: String, senderUrl: String, callbackId: String) {
+        val senderJson = JSONObject().apply {
+            put("id", plugin.id)
+            put("url", senderUrl)
+            put("tab", JSONObject().apply {
+                put("id", 1)
+                put("active", true)
+                put("currentWindow", true)
+                put("url", if (plugin.allowReadUrl) webView.url.orEmpty() else "")
+                put("title", webView.title.orEmpty())
+            })
+        }.toString()
+        val script = "window.__cfDispatchRuntimeMessage&&window.__cfDispatchRuntimeMessage(" +
+            JSONObject.quote(messageJson) + "," +
+            JSONObject.quote(senderJson) + "," +
+            JSONObject.quote(callbackId) +
+            ");"
+        target.evaluateJavascript(script, null)
+    }
+
+    private fun routeRuntimeMessage(plugin: BrowserPlugin, source: WebView?, messageJson: String, senderUrl: String, callbackId: String, attempt: Int = 0) {
+        val background = pluginBackgroundRuntimes[plugin.id]
+        when {
+            background != null && background !== source && pluginBackgroundRuntimeReady.contains(plugin.id) -> {
+                dispatchRuntimeMessageToWebView(background, plugin, messageJson, senderUrl, callbackId)
+            }
+            background != null && background !== source && attempt < 30 -> {
+                background.postDelayed({
+                    routeRuntimeMessage(plugin, source, messageJson, senderUrl, callbackId, attempt + 1)
+                }, 100L)
+            }
+            webView !== source -> {
+                dispatchRuntimeMessageToWebView(webView, plugin, messageJson, senderUrl, callbackId)
+            }
+            else -> {
+                completeRuntimeMessage(callbackId, "null")
+            }
+        }
+    }
+
+    private fun completeRuntimeMessage(callbackId: String, responseJson: String) {
+        if (callbackId.isBlank()) return
+        val target = pendingRuntimeMessageTargets.remove(callbackId) ?: return
+        val script = "window.__cfResolveRuntimeMessage&&window.__cfResolveRuntimeMessage(" +
+            JSONObject.quote(callbackId) + "," +
+            JSONObject.quote(responseJson.ifBlank { "null" }) +
+            ");"
+        target.evaluateJavascript(script, null)
+    }
+
     inner class PluginBridge {
+        var sourceWebView: WebView? = null
+
         @JavascriptInterface
         fun toastFor(pluginId: String, message: String) {
             val plugin = findPlugin(pluginId) ?: return
@@ -2445,6 +2749,98 @@ class MainActivity : AppCompatActivity() {
             val plugin = findPlugin(pluginId) ?: return ""
             if (!plugin.allowReadUrl) return ""
             return webView.url ?: ""
+        }
+
+        @JavascriptInterface
+        fun activeTabsJsonFor(pluginId: String, queryInfoJson: String): String {
+            val plugin = findPlugin(pluginId) ?: return "[]"
+            val tab = JSONObject().apply {
+                put("id", 1)
+                put("active", true)
+                put("currentWindow", true)
+                if (plugin.allowReadUrl) put("url", webView.url.orEmpty())
+                put("title", webView.title.orEmpty())
+            }
+            return JSONArray().put(tab).toString()
+        }
+
+        @JavascriptInterface
+        fun sendRuntimeMessageFor(pluginId: String, messageJson: String, senderUrl: String, callbackId: String) {
+            val plugin = findPlugin(pluginId) ?: return runOnUiThread { completeRuntimeMessage(callbackId, "null") }
+            sourceWebView?.let { pendingRuntimeMessageTargets[callbackId] = it }
+            runOnUiThread {
+                ensureBackgroundRuntime(plugin)
+                routeRuntimeMessage(plugin, sourceWebView, messageJson, senderUrl, callbackId)
+            }
+        }
+
+        @JavascriptInterface
+        fun sendTabMessageFor(pluginId: String, tabId: Int, messageJson: String, senderUrl: String, callbackId: String) {
+            val plugin = findPlugin(pluginId) ?: return runOnUiThread { completeRuntimeMessage(callbackId, "null") }
+            sourceWebView?.let { pendingRuntimeMessageTargets[callbackId] = it }
+            runOnUiThread {
+                dispatchRuntimeMessageToWebView(webView, plugin, messageJson, senderUrl, callbackId)
+            }
+        }
+
+        @JavascriptInterface
+        fun completeRuntimeMessageFor(pluginId: String, callbackId: String, responseJson: String) {
+            findPlugin(pluginId) ?: return
+            runOnUiThread { completeRuntimeMessage(callbackId, responseJson) }
+        }
+
+        @JavascriptInterface
+        fun executeScriptFor(pluginId: String, code: String, filesJson: String, callbackId: String) {
+            val plugin = findPlugin(pluginId) ?: return runOnUiThread { completeRuntimeMessage(callbackId, "null") }
+            sourceWebView?.let { pendingRuntimeMessageTargets[callbackId] = it }
+            runOnUiThread {
+                val script = buildString {
+                    append("(function(){try{var __cfResult=null;")
+                    val zipBytes = readPluginPackageBytes(plugin)
+                    val files = runCatching { JSONArray(filesJson) }.getOrNull() ?: JSONArray()
+                    for (i in 0 until files.length()) {
+                        val filePath = normalizeExtensionPath(plugin, files.optString(i))
+                        val fileSource = zipBytes?.let { ChromeExtensionInstaller.extractTextFileFromZip(it, filePath) }.orEmpty()
+                        if (fileSource.isNotBlank()) {
+                            append("\n/* ").append(filePath.replace("*/", "")).append(" */\n")
+                            append(fileSource).append("\n")
+                        }
+                    }
+                    if (code.isNotBlank()) append(code).append("\n")
+                    append("return JSON.stringify({result:__cfResult});")
+                    append("}catch(e){return JSON.stringify({error:String(e)});}})();")
+                }
+                webView.evaluateJavascript(script) { result ->
+                    val payloadText = runCatching { org.json.JSONTokener(result ?: "null").nextValue() as? String }.getOrNull() ?: "{}"
+                    val payload = runCatching { JSONObject(payloadText) }.getOrNull() ?: JSONObject()
+                    val response = if (payload.has("error")) {
+                        JSONObject().put("error", payload.optString("error")).toString()
+                    } else {
+                        JSONArray().put(JSONObject().put("result", payload.opt("result"))).toString()
+                    }
+                    completeRuntimeMessage(callbackId, response)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun insertCssFor(pluginId: String, css: String, filesJson: String, callbackId: String) {
+            val plugin = findPlugin(pluginId) ?: return runOnUiThread { completeRuntimeMessage(callbackId, "null") }
+            sourceWebView?.let { pendingRuntimeMessageTargets[callbackId] = it }
+            runOnUiThread {
+                val cssBuilder = StringBuilder(css)
+                val zipBytes = readPluginPackageBytes(plugin)
+                val files = runCatching { JSONArray(filesJson) }.getOrNull() ?: JSONArray()
+                for (i in 0 until files.length()) {
+                    val filePath = normalizeExtensionPath(plugin, files.optString(i))
+                    val fileSource = zipBytes?.let { ChromeExtensionInstaller.extractTextFileFromZip(it, filePath) }.orEmpty()
+                    if (fileSource.isNotBlank()) cssBuilder.append("\n").append(fileSource)
+                }
+                val script = "(function(){try{var style=document.createElement('style');style.textContent=" +
+                    JSONObject.quote(cssBuilder.toString()) +
+                    ";document.documentElement.appendChild(style);return true;}catch(e){return false;}})();"
+                webView.evaluateJavascript(script) { completeRuntimeMessage(callbackId, "null") }
+            }
         }
 
         @JavascriptInterface
