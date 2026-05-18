@@ -1296,7 +1296,6 @@ class MainActivity : AppCompatActivity() {
             removePlugin(plugin.id)
             pluginBackgroundRuntimes.remove(plugin.id)?.destroy()
             pluginLastError.remove(plugin.id)
-            pluginMessageCatalogs.remove(plugin.id)
             if (activeSidePanelPluginId == plugin.id) closePluginSidePanel()
             Toast.makeText(this, "Plugin deleted", Toast.LENGTH_SHORT).show()
         })
