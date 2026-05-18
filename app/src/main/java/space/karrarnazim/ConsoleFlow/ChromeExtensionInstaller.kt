@@ -11,7 +11,9 @@ data class ParsedExtensionPayload(
     val name: String,
     val matchPattern: String,
     val script: String,
-    val popupPath: String?
+    val popupPath: String?,
+    val sidePanelPath: String?,
+    val optionsPage: String?
 )
 
 object ChromeExtensionInstaller {
@@ -104,12 +106,15 @@ object ChromeExtensionInstaller {
 
         val manifestRaw = files["manifest.json"] ?: throw IllegalStateException("manifest.json not found")
         val manifest = JSONObject(manifestRaw)
-        val name = manifest.optString("name", "Chrome Extension $extensionId")
+        val name = resolveExtensionName(manifest, files, "Chrome Extension $extensionId")
         val contentScripts = manifest.optJSONArray("content_scripts") ?: JSONArray()
         val scriptBuilder = StringBuilder()
         var matchPattern = "*"
-        val popupPath = manifest.optJSONObject("action")?.optString("default_popup")
-            ?: manifest.optJSONObject("browser_action")?.optString("default_popup")
+        val popupPath = manifest.optJSONObject("action")?.optString("default_popup")?.ifBlank { null }
+            ?: manifest.optJSONObject("browser_action")?.optString("default_popup")?.ifBlank { null }
+        val sidePanelPath = manifest.optJSONObject("side_panel")?.optString("default_path")?.ifBlank { null }
+        val optionsPage = manifest.optJSONObject("options_ui")?.optString("page")?.ifBlank { null }
+            ?: manifest.optString("options_page").ifBlank { null }
 
         for (i in 0 until contentScripts.length()) {
             val obj = contentScripts.optJSONObject(i) ?: continue
@@ -150,15 +155,77 @@ object ChromeExtensionInstaller {
             }
         }
 
-        if (scriptBuilder.isBlank()) throw IllegalStateException("No compatible content scripts found")
+        val hasBackground = collectBackgroundScriptPaths(manifest).isNotEmpty()
+        if (scriptBuilder.isBlank() && popupPath.isNullOrBlank() && sidePanelPath.isNullOrBlank() && optionsPage.isNullOrBlank() && !hasBackground) {
+            throw IllegalStateException("No compatible content scripts or extension UI pages found")
+        }
 
         return ParsedExtensionPayload(
             extensionId = extensionId,
             name = name,
             matchPattern = normalizeChromeMatch(matchPattern),
             script = scriptBuilder.toString(),
-            popupPath = popupPath
+            popupPath = popupPath,
+            sidePanelPath = sidePanelPath,
+            optionsPage = optionsPage
         )
+    }
+
+
+    fun resolveExtensionName(zipBytes: ByteArray, fallback: String): String {
+        val files = mutableMapOf<String, String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory && (entry.name == "manifest.json" || entry.name.matches(Regex("_locales/[^/]+/messages\\.json")))) {
+                    val data = ByteArrayOutputStream()
+                    val buffer = ByteArray(4096)
+                    var len = zip.read(buffer)
+                    while (len > 0) {
+                        data.write(buffer, 0, len)
+                        len = zip.read(buffer)
+                    }
+                    files[entry.name] = data.toString(Charsets.UTF_8.name())
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        val manifest = files["manifest.json"]?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?: return fallback
+        return resolveExtensionName(manifest, files, fallback)
+    }
+
+    private fun resolveExtensionName(manifest: JSONObject, files: Map<String, String>, fallback: String): String {
+        val rawName = manifest.optString("name", fallback).ifBlank { fallback }
+        return resolveManifestMessage(rawName, manifest, files).ifBlank { fallback }
+    }
+
+    private fun resolveManifestMessage(value: String, manifest: JSONObject, files: Map<String, String>): String {
+        val match = Regex("^__MSG_([A-Za-z0-9_@.-]+)__$").matchEntire(value.trim()) ?: return value
+        val key = match.groupValues[1]
+        val localeCandidates = buildList {
+            manifest.optString("default_locale").takeIf { it.isNotBlank() }?.let { add(it) }
+            add("en_US")
+            add("en")
+            files.keys
+                .filter { it.startsWith("_locales/") && it.endsWith("/messages.json") }
+                .map { it.removePrefix("_locales/").substringBefore('/') }
+                .forEach { if (!contains(it)) add(it) }
+        }
+
+        for (locale in localeCandidates) {
+            val messagesRaw = files["_locales/$locale/messages.json"] ?: continue
+            val messages = runCatching { JSONObject(messagesRaw) }.getOrNull() ?: continue
+            val messageObject = messages.optJSONObject(key)
+                ?: messages.keys().asSequence()
+                    .firstOrNull { it.equals(key, ignoreCase = true) }
+                    ?.let { messages.optJSONObject(it) }
+            val message = messageObject?.optString("message")?.takeIf { it.isNotBlank() }
+            if (!message.isNullOrBlank()) return message
+        }
+
+        return value
     }
 
     private fun normalizeChromeMatch(matchPattern: String): String {
@@ -169,6 +236,56 @@ object ChromeExtensionInstaller {
             .replace("https://", "")
             .replace("/*", "")
             .replace("*.", "")
+    }
+
+
+    fun listFilePaths(zipBytes: ByteArray): List<String> {
+        val paths = mutableListOf<String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) paths.add(entry.name)
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        return paths.sorted()
+    }
+
+    fun replaceTextFileInZip(zipBytes: ByteArray, targetPath: String, newContent: String): ByteArray {
+        val normalized = targetPath.trimStart('/')
+        val out = ByteArrayOutputStream()
+        val replaced = booleanArrayOf(false)
+        java.util.zip.ZipOutputStream(out).use { zipOut ->
+            ZipInputStream(ByteArrayInputStream(zipBytes)).use { zipIn ->
+                var entry = zipIn.nextEntry
+                val buffer = ByteArray(8192)
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        zipOut.putNextEntry(java.util.zip.ZipEntry(entry.name))
+                        if (entry.name == normalized) {
+                            zipOut.write(newContent.toByteArray(Charsets.UTF_8))
+                            replaced[0] = true
+                        } else {
+                            var len = zipIn.read(buffer)
+                            while (len > 0) {
+                                zipOut.write(buffer, 0, len)
+                                len = zipIn.read(buffer)
+                            }
+                        }
+                        zipOut.closeEntry()
+                    }
+                    zipIn.closeEntry()
+                    entry = zipIn.nextEntry
+                }
+            }
+            if (!replaced[0]) {
+                zipOut.putNextEntry(java.util.zip.ZipEntry(normalized))
+                zipOut.write(newContent.toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+            }
+        }
+        return out.toByteArray()
     }
 
     fun extractFileFromZip(zipBytes: ByteArray, targetPath: String): ByteArray? {
