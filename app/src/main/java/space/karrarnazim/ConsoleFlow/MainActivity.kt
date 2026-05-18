@@ -101,6 +101,7 @@ class MainActivity : AppCompatActivity() {
     private var activeSidePanelWebView: WebView? = null
     private var activeSidePanelPluginId: String? = null
     private val pluginLastError = mutableMapOf<String, String>()
+    private val pluginMessageCatalogs = ConcurrentHashMap<String, String>()
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
 
     private val HOME_URL = "file:///android_asset/home.html"
@@ -1061,12 +1062,120 @@ class MainActivity : AppCompatActivity() {
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
         val run = pluginManagerButton("Run") { runPluginFully(plugin) }
         val edit = pluginManagerButton("Edit") { parentDialog.dismiss(); showPluginEditorPage(plugin) { showPluginManagerPage() } }
+        val files = pluginManagerButton("Files") { parentDialog.dismiss(); showPluginFilesPage(plugin) { showPluginManagerPage() } }
         val more = pluginManagerButton("More") { showPluginActions(plugin) }
         buttons.addView(run, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
         buttons.addView(edit, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
+        buttons.addView(files, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
         buttons.addView(more, LinearLayout.LayoutParams(0, dp(40), 1f))
         row.addView(buttons)
         return row
+    }
+
+    private fun showPluginFilesPage(plugin: BrowserPlugin, onDone: (() -> Unit)? = null) {
+        val zipBytes = readPluginPackageBytes(plugin)
+        if (zipBytes == null) {
+            Toast.makeText(this, "Plugin package files are missing", Toast.LENGTH_SHORT).show()
+            onDone?.invoke()
+            return
+        }
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0F1620.toInt())
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(10), 0)
+            setBackgroundColor(0xFF141D29.toInt())
+        }
+        val title = TextView(this).apply {
+            text = "${plugin.name} Files"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 20f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            maxLines = 1
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss(); onDone?.invoke() }
+        }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(56), 1f))
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(56)))
+        root.addView(header)
+
+        val scroll = ScrollView(this)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(16))
+        }
+        ChromeExtensionInstaller.listFilePaths(zipBytes)
+            .filter { isEditablePluginFile(it) }
+            .forEach { path ->
+                val row = TextView(this).apply {
+                    text = path
+                    setTextColor(0xFFFFFFFF.toInt())
+                    textSize = 14f
+                    setPadding(dp(14), 0, dp(14), 0)
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = getDrawable(R.drawable.browser_tab_inactive_bg)
+                    setOnClickListener {
+                        showPluginFileEditor(plugin, path) {
+                            dialog.dismiss()
+                            showPluginFilesPage(findPlugin(plugin.id) ?: plugin, onDone)
+                        }
+                    }
+                }
+                list.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply { bottomMargin = dp(8) })
+            }
+        scroll.addView(list)
+        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        dialog.setContentView(root)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+    }
+
+    private fun isEditablePluginFile(path: String): Boolean {
+        return path.endsWith(".js", true) || path.endsWith(".html", true) || path.endsWith(".css", true) ||
+                path.endsWith(".json", true) || path.endsWith(".txt", true)
+    }
+
+    private fun showPluginFileEditor(plugin: BrowserPlugin, path: String, onDone: (() -> Unit)? = null) {
+        val zipBytes = readPluginPackageBytes(plugin) ?: return
+        val content = ChromeExtensionInstaller.extractTextFileFromZip(zipBytes, path) ?: ""
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFF0F1620.toInt()) }
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), 0, dp(8), 0); setBackgroundColor(0xFF141D29.toInt()) }
+        val title = TextView(this).apply { text = path; setTextColor(0xFFFFFFFF.toInt()); textSize = 16f; maxLines = 1 }
+        val editor = pluginEditText("", content, singleLine = false).apply { gravity = Gravity.TOP or Gravity.START; textSize = 13f }
+        val save = pluginManagerButton("Save") {
+            val currentPlugin = findPlugin(plugin.id) ?: plugin
+            val currentZip = readPluginPackageBytes(currentPlugin) ?: return@pluginManagerButton
+            val updatedZip = ChromeExtensionInstaller.replaceTextFileInZip(currentZip, path, editor.text.toString())
+            val fileName = writePluginPackage(currentPlugin.id, updatedZip)
+            upsertPlugin(currentPlugin.copy(packageFileName = fileName, packageZipBase64 = null))
+            pluginMessageCatalogs.remove(currentPlugin.id)
+            Toast.makeText(this, "File saved", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+            onDone?.invoke()
+        }
+        val close = TextView(this).apply { text = "×"; setTextColor(0xFFFFFFFF.toInt()); textSize = 28f; gravity = Gravity.CENTER; setOnClickListener { dialog.dismiss(); onDone?.invoke() } }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(56), 1f))
+        header.addView(save, LinearLayout.LayoutParams(dp(84), dp(42)).apply { marginEnd = dp(8) })
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(56)))
+        root.addView(header)
+        root.addView(editor, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        dialog.setContentView(root)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
     }
 
     private fun showInstallFromChromeStoreDialog() {
@@ -1292,9 +1401,12 @@ class MainActivity : AppCompatActivity() {
         val url = request.url.toString()
         val host = request.url.host ?: ""
 
-        if (host == "chrome-extension.local") {
-            val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
-            val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
+        val isHttpsExtension = host == "chrome-extension.local"
+        val isChromeExtension = request.url.scheme == "chrome-extension"
+        if (isHttpsExtension || isChromeExtension) {
+            val extensionId = if (isChromeExtension) host else request.url.pathSegments.firstOrNull().orEmpty()
+            val pathSegments = if (isChromeExtension) request.url.pathSegments else request.url.pathSegments.drop(1)
+            val path = URLDecoder.decode(pathSegments.joinToString("/"), "UTF-8")
             if (extensionId.isNotBlank() && path.isNotBlank()) {
                 val plugin = findPlugin(extensionId)
                 val zipBytes = plugin?.let { readPluginPackageBytes(it) }
@@ -1302,10 +1414,18 @@ class MainActivity : AppCompatActivity() {
                     return try {
                         val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
                         if (fileBytes != null) {
+                            val mimeType = guessMimeType(path)
+                            val responseBytes = if (mimeType == "text/html" && plugin != null) {
+                                injectExtensionBootstrapIntoHtml(
+                                    fileBytes.toString(Charsets.UTF_8),
+                                    plugin,
+                                    "window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closeExtensionSurfaceFor(${JSONObject.quote(plugin.id)});};"
+                                ).toByteArray(Charsets.UTF_8)
+                            } else fileBytes
                             WebResourceResponse(
-                                guessMimeType(path),
+                                mimeType,
                                 "utf-8",
-                                ByteArrayInputStream(fileBytes)
+                                ByteArrayInputStream(responseBytes)
                             ).apply {
                                 responseHeaders = mapOf(
                                     "Access-Control-Allow-Origin" to "*",
@@ -1346,6 +1466,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         return null
+    }
+
+    private fun injectExtensionBootstrapIntoHtml(html: String, plugin: BrowserPlugin, closeScript: String): String {
+        val bootstrap = "<script>${buildChromeCompatLayer(plugin.id)}${buildPluginApiBootstrap(plugin)}$closeScript</script>"
+        val cleaned = html
+            .replace(Regex("<meta[^>]+http-equiv=[\\\"']Content-Security-Policy[\\\"'][^>]*>", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("<meta[^>]+content=[\\\"'][^\\\"']*script-src[^\\\"']*[\\\"'][^>]*>", RegexOption.IGNORE_CASE), "")
+        return when {
+            cleaned.contains("<head", ignoreCase = true) -> cleaned.replaceFirst(
+                Regex("<head([^>]*)>", RegexOption.IGNORE_CASE),
+                "<head$1>$bootstrap"
+            )
+            cleaned.contains("<html", ignoreCase = true) -> cleaned.replaceFirst(
+                Regex("<html([^>]*)>", RegexOption.IGNORE_CASE),
+                "<html$1><head>$bootstrap</head>"
+            )
+            else -> "$bootstrap$cleaned"
+        }
     }
 
     private fun normalizeExtensionPath(plugin: BrowserPlugin, path: String?): String {
@@ -1651,7 +1789,7 @@ class MainActivity : AppCompatActivity() {
             val name = nameInput.text.toString().trim().ifEmpty { "Plugin" }
             val match = matchInput.text.toString().trim().ifEmpty { "*" }
             val script = scriptInput.text.toString()
-            if (script.isBlank()) {
+            if (script.isBlank() && existing?.packageFileName.isNullOrBlank()) {
                 Toast.makeText(this, "Script cannot be empty", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
@@ -1890,6 +2028,34 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(bootstrap, null)
     }
 
+    private fun getPluginMessagesJson(pluginId: String): String {
+        pluginMessageCatalogs[pluginId]?.let { return it }
+        val plugin = findPlugin(pluginId) ?: return "{}"
+        val zipBytes = readPluginPackageBytes(plugin) ?: return "{}"
+        val manifest = ChromeExtensionInstaller.readManifest(zipBytes)
+        val localeCandidates = mutableListOf<String>()
+        manifest?.optString("default_locale")?.takeIf { it.isNotBlank() }?.let { localeCandidates.add(it) }
+        localeCandidates.add("en_US")
+        localeCandidates.add("en")
+        ChromeExtensionInstaller.listFilePaths(zipBytes)
+            .filter { it.startsWith("_locales/") && it.endsWith("/messages.json") }
+            .map { it.removePrefix("_locales/").substringBefore('/') }
+            .forEach { if (!localeCandidates.contains(it)) localeCandidates.add(it) }
+
+        val result = JSONObject()
+        localeCandidates.forEach { locale ->
+            val raw = ChromeExtensionInstaller.extractTextFileFromZip(zipBytes, "_locales/$locale/messages.json")
+                ?: return@forEach
+            val messages = runCatching { JSONObject(raw) }.getOrNull() ?: return@forEach
+            messages.keys().forEach { key ->
+                if (!result.has(key)) {
+                    messages.optJSONObject(key)?.optString("message")?.takeIf { it.isNotBlank() }?.let { result.put(key, it) }
+                }
+            }
+        }
+        return result.toString().also { pluginMessageCatalogs[pluginId] = it }
+    }
+
     private fun buildPluginApiBootstrap(plugin: BrowserPlugin): String {
         return buildString {
             append("window.ConsoleFlowPlugin={")
@@ -1936,6 +2102,7 @@ class MainActivity : AppCompatActivity() {
         val plugin = findPlugin(extensionId)
         val defaultPopupPath = plugin?.popupPath.orEmpty()
         val defaultSidePanelPath = plugin?.sidePanelPath.orEmpty()
+        val messagesJson = getPluginMessagesJson(extensionId)
         return """
             (function(){
               if(!window.__cfExtBus){window.__cfExtBus={listeners:{}};}
@@ -1958,6 +2125,7 @@ class MainActivity : AppCompatActivity() {
               if(!window.chrome.browserAction){window.chrome.browserAction={};}
               if(!window.chrome.sidePanel){window.chrome.sidePanel={};}
               if(!window.chrome.windows){window.chrome.windows={};}
+              if(!window.chrome.i18n){window.chrome.i18n={};}
             
               var storeKey='__cf_store__' + ${JSONObject.quote(extensionId)};
               if(!window.chrome.storage.local){
@@ -2001,6 +2169,21 @@ class MainActivity : AppCompatActivity() {
                 };
               }
             
+              var __cfMessages = $messagesJson;
+              if(!window.chrome.i18n.getMessage){
+                window.chrome.i18n.getMessage=function(name, substitutions){
+                  if(name==='@@extension_id') return window.chrome.runtime.id;
+                  if(name==='@@ui_locale') return 'en_US';
+                  var msg=__cfMessages && __cfMessages[name];
+                  if(!msg) return '';
+                  var subs=Array.isArray(substitutions)?substitutions:(substitutions===undefined?[]:[substitutions]);
+                  subs.forEach(function(value, index){
+                    msg=String(msg).replace(new RegExp('\\$'+(index+1),'g'), String(value));
+                  });
+                  return msg;
+                };
+              }
+
               window.chrome.runtime.id = ${JSONObject.quote(extensionId)};
               window.chrome.runtime.getURL = function(path){
                 return 'https://chrome-extension.local/' + window.chrome.runtime.id + '/' + String(path||'').replace(/^\/+/,'');

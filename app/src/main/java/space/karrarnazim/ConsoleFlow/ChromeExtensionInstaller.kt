@@ -238,6 +238,56 @@ object ChromeExtensionInstaller {
             .replace("*.", "")
     }
 
+
+    fun listFilePaths(zipBytes: ByteArray): List<String> {
+        val paths = mutableListOf<String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) paths.add(entry.name)
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        return paths.sorted()
+    }
+
+    fun replaceTextFileInZip(zipBytes: ByteArray, targetPath: String, newContent: String): ByteArray {
+        val normalized = targetPath.trimStart('/')
+        val out = ByteArrayOutputStream()
+        val replaced = booleanArrayOf(false)
+        java.util.zip.ZipOutputStream(out).use { zipOut ->
+            ZipInputStream(ByteArrayInputStream(zipBytes)).use { zipIn ->
+                var entry = zipIn.nextEntry
+                val buffer = ByteArray(8192)
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        zipOut.putNextEntry(java.util.zip.ZipEntry(entry.name))
+                        if (entry.name == normalized) {
+                            zipOut.write(newContent.toByteArray(Charsets.UTF_8))
+                            replaced[0] = true
+                        } else {
+                            var len = zipIn.read(buffer)
+                            while (len > 0) {
+                                zipOut.write(buffer, 0, len)
+                                len = zipIn.read(buffer)
+                            }
+                        }
+                        zipOut.closeEntry()
+                    }
+                    zipIn.closeEntry()
+                    entry = zipIn.nextEntry
+                }
+            }
+            if (!replaced[0]) {
+                zipOut.putNextEntry(java.util.zip.ZipEntry(normalized))
+                zipOut.write(newContent.toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
     fun extractFileFromZip(zipBytes: ByteArray, targetPath: String): ByteArray? {
         val normalized = targetPath.trimStart('/')
         ZipInputStream(ByteArrayInputStream(zipBytes)).use { zip ->
