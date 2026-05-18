@@ -1402,9 +1402,12 @@ class MainActivity : AppCompatActivity() {
         val url = request.url.toString()
         val host = request.url.host ?: ""
 
-        if (host == "chrome-extension.local") {
-            val extensionId = request.url.pathSegments.firstOrNull().orEmpty()
-            val path = URLDecoder.decode(request.url.pathSegments.drop(1).joinToString("/"), "UTF-8")
+        val isHttpsExtension = host == "chrome-extension.local"
+        val isChromeExtension = request.url.scheme == "chrome-extension"
+        if (isHttpsExtension || isChromeExtension) {
+            val extensionId = if (isChromeExtension) host else request.url.pathSegments.firstOrNull().orEmpty()
+            val pathSegments = if (isChromeExtension) request.url.pathSegments else request.url.pathSegments.drop(1)
+            val path = URLDecoder.decode(pathSegments.joinToString("/"), "UTF-8")
             if (extensionId.isNotBlank() && path.isNotBlank()) {
                 val plugin = findPlugin(extensionId)
                 val zipBytes = plugin?.let { readPluginPackageBytes(it) }
@@ -1412,10 +1415,18 @@ class MainActivity : AppCompatActivity() {
                     return try {
                         val fileBytes = ChromeExtensionInstaller.extractFileFromZip(zipBytes, path)
                         if (fileBytes != null) {
+                            val mimeType = guessMimeType(path)
+                            val responseBytes = if (mimeType == "text/html" && plugin != null) {
+                                injectExtensionBootstrapIntoHtml(
+                                    fileBytes.toString(Charsets.UTF_8),
+                                    plugin,
+                                    "window.close=function(){if(window.ConsoleFlowHost)ConsoleFlowHost.closeExtensionSurfaceFor(${JSONObject.quote(plugin.id)});};"
+                                ).toByteArray(Charsets.UTF_8)
+                            } else fileBytes
                             WebResourceResponse(
-                                guessMimeType(path),
+                                mimeType,
                                 "utf-8",
-                                ByteArrayInputStream(fileBytes)
+                                ByteArrayInputStream(responseBytes)
                             ).apply {
                                 responseHeaders = mapOf(
                                     "Access-Control-Allow-Origin" to "*",
@@ -1456,6 +1467,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         return null
+    }
+
+    private fun injectExtensionBootstrapIntoHtml(html: String, plugin: BrowserPlugin, closeScript: String): String {
+        val bootstrap = "<script>${buildChromeCompatLayer(plugin.id)}${buildPluginApiBootstrap(plugin)}$closeScript</script>"
+        val cleaned = html
+            .replace(Regex("<meta[^>]+http-equiv=[\\\"']Content-Security-Policy[\\\"'][^>]*>", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("<meta[^>]+content=[\\\"'][^\\\"']*script-src[^\\\"']*[\\\"'][^>]*>", RegexOption.IGNORE_CASE), "")
+        return when {
+            cleaned.contains("<head", ignoreCase = true) -> cleaned.replaceFirst(
+                Regex("<head([^>]*)>", RegexOption.IGNORE_CASE),
+                "<head$1>$bootstrap"
+            )
+            cleaned.contains("<html", ignoreCase = true) -> cleaned.replaceFirst(
+                Regex("<html([^>]*)>", RegexOption.IGNORE_CASE),
+                "<html$1><head>$bootstrap</head>"
+            )
+            else -> "$bootstrap$cleaned"
+        }
     }
 
     private fun normalizeExtensionPath(plugin: BrowserPlugin, path: String?): String {
