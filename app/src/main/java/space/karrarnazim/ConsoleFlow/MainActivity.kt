@@ -105,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
     private val pluginBackgroundRuntimeReady = ConcurrentHashMap.newKeySet<String>()
     private val pendingRuntimeMessageTargets = ConcurrentHashMap<String, WebView>()
+    @Volatile private var cachedPlugins: MutableList<BrowserPlugin>? = null
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -975,6 +976,7 @@ class MainActivity : AppCompatActivity() {
             showInstallFromChromeStoreDialog()
         }
         val clear = pluginManagerButton("Clear All") {
+            cachedPlugins = null
             prefsManager.pluginsJson = "[]"
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
@@ -1992,6 +1994,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        cachedPlugins?.let { return it.toMutableList() }
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
@@ -2056,10 +2059,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = list.toMutableList()
         return list
     }
 
     private fun savePlugins(plugins: List<BrowserPlugin>) {
+        cachedPlugins = plugins.toMutableList()
         val arr = JSONArray()
         plugins.forEach { plugin ->
             arr.put(
