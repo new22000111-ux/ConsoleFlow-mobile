@@ -1,0 +1,3 @@
+## 2024-03-24 - Prevent frequent SharedPreferences JSON parsing overhead
+**Learning:** Parsing large JSON strings from `SharedPreferences` (like Chrome Extension configurations that historically contained Base64 ZIP payloads) on a frequent, hot path (like intercepting WebView resource requests or runtime messages) can cause severe memory and CPU bottlenecks. SharedPreferences does not magically cache decoded JSON.
+**Action:** When a SharedPreferences key holds complex JSON that is read frequently, always deserialize it once and maintain an in-memory cache, invalidating or updating the cache upon writes.
