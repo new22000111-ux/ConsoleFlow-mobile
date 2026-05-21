@@ -1,0 +1,3 @@
+## 2024-05-24 - SharedPreferences JSON parsing blocking interceptors
+**Learning:** In ConsoleFlow, plugins are stored as a JSON array string in SharedPreferences (`pluginsJson`), which is parsed dynamically and even involves Base64 decoding fallback. Network interceptors check this list heavily, causing expensive main-thread and worker-thread blockages, especially if base64 packages are still lingering.
+**Action:** When working with SharedPreferences arrays/objects that are read frequently by network intercepts or loops, always cache them in an in-memory list (e.g. `@Volatile private var cachedPlugins: List<BrowserPlugin>? = null`) and ensure cache invalidation happens on `save` and `clear`.
