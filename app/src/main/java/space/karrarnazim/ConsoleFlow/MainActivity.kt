@@ -37,6 +37,8 @@ import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : AppCompatActivity() {
+    @Volatile private var cachedPlugins: List<BrowserPlugin>? = null
+
     data class BrowserTab(
         val id: Int,
         var title: String,
@@ -976,6 +978,7 @@ class MainActivity : AppCompatActivity() {
         }
         val clear = pluginManagerButton("Clear All") {
             prefsManager.pluginsJson = "[]"
+            cachedPlugins = emptyList()
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
             pluginBackgroundRuntimes.clear()
@@ -1992,6 +1995,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        // Use cached list to avoid expensive SharedPreferences JSON parsing and base64 decode on every page load
+        cachedPlugins?.let { return it.toMutableList() }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
@@ -2056,10 +2062,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = list.toList()
         return list
     }
 
     private fun savePlugins(plugins: List<BrowserPlugin>) {
+        cachedPlugins = plugins.toList()
         val arr = JSONArray()
         plugins.forEach { plugin ->
             arr.put(
