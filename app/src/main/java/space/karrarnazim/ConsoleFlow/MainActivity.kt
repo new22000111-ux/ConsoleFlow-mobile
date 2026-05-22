@@ -119,6 +119,9 @@ class MainActivity : AppCompatActivity() {
         "yahoo.com", "yandex.com"
     )
 
+    // Performance Optimization: Cache plugins in memory to avoid repetitive parsing of large JSON strings from SharedPreferences
+    private var cachedPlugins: MutableList<BrowserPlugin>? = null
+
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -976,6 +979,7 @@ class MainActivity : AppCompatActivity() {
         }
         val clear = pluginManagerButton("Clear All") {
             prefsManager.pluginsJson = "[]"
+            cachedPlugins = mutableListOf()
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
             pluginBackgroundRuntimes.clear()
@@ -1992,6 +1996,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        // Performance Optimization: Return cached plugins to prevent expensive JSON parsing
+        // from SharedPreferences every time a URL is requested or plugins are checked.
+        cachedPlugins?.let {
+            return ArrayList(it)
+        }
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
@@ -2056,6 +2065,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = ArrayList(list)
         return list
     }
 
@@ -2083,6 +2093,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         prefsManager.pluginsJson = arr.toString()
+        cachedPlugins = plugins.toMutableList()
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
