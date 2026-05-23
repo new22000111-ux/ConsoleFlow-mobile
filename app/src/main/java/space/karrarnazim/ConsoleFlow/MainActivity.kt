@@ -110,6 +110,10 @@ class MainActivity : AppCompatActivity() {
     private val ERROR_URL = "file:///android_asset/error.html"
     private val CHROME_STORE_URL = "https://chromewebstore.google.com/"
 
+    // Performance optimization: Cache parsed plugins to avoid redundant SharedPreferences reads
+    // and expensive JSON parsing on every getPlugins() call. Impact: O(1) memory lookup vs O(N) parsing
+    private var cachedPlugins: MutableList<BrowserPlugin>? = null
+
     // Domains that trigger CAPTCHA when intercepted by OkHttp — skip interception for these
     private val NO_INTERCEPT_DOMAINS = listOf(
         "google.com", "googleapis.com", "gstatic.com", "accounts.google.com",
@@ -976,6 +980,7 @@ class MainActivity : AppCompatActivity() {
         }
         val clear = pluginManagerButton("Clear All") {
             prefsManager.pluginsJson = "[]"
+            cachedPlugins = mutableListOf()
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
             pluginBackgroundRuntimes.clear()
@@ -1992,6 +1997,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        cachedPlugins?.let { return it.toMutableList() }
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
@@ -2056,6 +2062,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = list.toMutableList()
         return list
     }
 
@@ -2083,6 +2090,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         prefsManager.pluginsJson = arr.toString()
+        cachedPlugins = plugins.toMutableList()
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
