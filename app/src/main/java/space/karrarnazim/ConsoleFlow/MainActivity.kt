@@ -106,6 +106,10 @@ class MainActivity : AppCompatActivity() {
     private val pluginBackgroundRuntimeReady = ConcurrentHashMap.newKeySet<String>()
     private val pendingRuntimeMessageTargets = ConcurrentHashMap<String, WebView>()
 
+    private data class PluginCache(val json: String, val list: List<BrowserPlugin>)
+    @Volatile
+    private var cachedPlugins: PluginCache? = null
+
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
     private val CHROME_STORE_URL = "https://chromewebstore.google.com/"
@@ -976,6 +980,7 @@ class MainActivity : AppCompatActivity() {
         }
         val clear = pluginManagerButton("Clear All") {
             prefsManager.pluginsJson = "[]"
+            cachedPlugins = PluginCache("[]", emptyList())
             clearPluginPackages()
             pluginBackgroundRuntimes.values.forEach { it.destroy() }
             pluginBackgroundRuntimes.clear()
@@ -1992,10 +1997,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+        // Optimization: check if json changed, return deep copy of cached list to prevent CPU/memory overhead
+        val cache = cachedPlugins
+        if (cache != null && cache.json == currentJson) {
+            return cache.list.map { it.copy() }.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -2056,6 +2068,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = PluginCache(currentJson, list.map { it.copy() })
         return list
     }
 
@@ -2082,7 +2095,9 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         }
-        prefsManager.pluginsJson = arr.toString()
+        val newJson = arr.toString()
+        prefsManager.pluginsJson = newJson
+        cachedPlugins = PluginCache(newJson, plugins.map { it.copy() })
     }
 
     private fun upsertPlugin(plugin: BrowserPlugin) {
