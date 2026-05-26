@@ -105,6 +105,9 @@ class MainActivity : AppCompatActivity() {
     private val pluginBackgroundRuntimes = ConcurrentHashMap<String, WebView>()
     private val pluginBackgroundRuntimeReady = ConcurrentHashMap.newKeySet<String>()
     private val pendingRuntimeMessageTargets = ConcurrentHashMap<String, WebView>()
+    @Volatile
+    private var pluginsCache: Pair<String, List<BrowserPlugin>>? = null
+
 
     private val HOME_URL = "file:///android_asset/home.html"
     private val ERROR_URL = "file:///android_asset/error.html"
@@ -1992,10 +1995,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+        val currentCache = pluginsCache
+
+        // Cache optimization: return deep copy if JSON hasn't changed to avoid CPU/memory overhead
+        if (currentCache != null && currentCache.first == currentJson) {
+            return currentCache.second.map { it.copy() }.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -2055,8 +2066,13 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
-        if (migratedPackages) savePlugins(list)
-        return list
+        if (migratedPackages) {
+            savePlugins(list)
+            pluginsCache = Pair(prefsManager.pluginsJson, list.toList())
+        } else {
+            pluginsCache = Pair(currentJson, list.toList())
+        }
+        return list.map { it.copy() }.toMutableList()
     }
 
     private fun savePlugins(plugins: List<BrowserPlugin>) {
