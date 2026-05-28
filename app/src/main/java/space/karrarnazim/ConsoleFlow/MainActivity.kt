@@ -1991,11 +1991,26 @@ class MainActivity : AppCompatActivity() {
                 (name.startsWith("_") && name.endsWith("_") && name.length > 2)
     }
 
+    @Volatile
+    private var pluginsCache: Pair<String, List<BrowserPlugin>> = Pair("", emptyList())
+
+    /**
+     * ⚡ Bolt Performance Optimization
+     * Caches the parsed BrowserPlugin list to prevent expensive JSON parsing and
+     * memory allocation on every call. Uses the raw JSON string as a cache key
+     * for fast validation, returning deep copies to prevent external mutations.
+     */
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+        val cache = pluginsCache
+        if (cache.first == currentJson) {
+            return cache.second.map { it.copy() }.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -2056,6 +2071,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        pluginsCache = Pair(currentJson, list.map { it.copy() }.toList())
         return list
     }
 
