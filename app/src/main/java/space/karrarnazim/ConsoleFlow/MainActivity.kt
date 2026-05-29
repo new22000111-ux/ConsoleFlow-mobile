@@ -63,6 +63,8 @@ class MainActivity : AppCompatActivity() {
         val allowReadUrl: Boolean = true
     )
 
+    @Volatile private var pluginsCache: Pair<String, List<BrowserPlugin>>? = null
+
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var progressBar: ProgressBar
@@ -1992,10 +1994,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val json = prefsManager.pluginsJson
+        val cache = pluginsCache
+        if (cache != null && cache.first == json) {
+            return cache.second.map { it.copy() }.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(json)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -2056,6 +2064,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        pluginsCache = Pair(json, list.map { it.copy() })
         return list
     }
 
