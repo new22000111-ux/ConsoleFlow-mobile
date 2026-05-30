@@ -44,6 +44,9 @@ class MainActivity : AppCompatActivity() {
         var state: Bundle? = null
     )
 
+    @Volatile
+    private var cachedPlugins: Pair<String, List<BrowserPlugin>>? = null
+
     data class BrowserPlugin(
         val id: String,
         val name: String,
@@ -1992,10 +1995,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getPlugins(): MutableList<BrowserPlugin> {
+        val currentJson = prefsManager.pluginsJson
+        val cache = cachedPlugins
+        if (cache != null && cache.first == currentJson) {
+            return cache.second.map { it.copy() }.toMutableList()
+        }
+
         val list = mutableListOf<BrowserPlugin>()
         var migratedPackages = false
         val arr = try {
-            JSONArray(prefsManager.pluginsJson)
+            JSONArray(currentJson)
         } catch (e: Exception) {
             JSONArray()
         }
@@ -2056,6 +2065,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (migratedPackages) savePlugins(list)
+        cachedPlugins = Pair(prefsManager.pluginsJson, list.map { it.copy() })
         return list
     }
 
